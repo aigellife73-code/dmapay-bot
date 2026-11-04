@@ -288,9 +288,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     pass
 
                 if matched_btn:
+                    # 1. Buy button par click
                     await matched_btn.click()
-                    await asyncio.sleep(1.2)
+                    await asyncio.sleep(1.5) # Payment options popup khulne ka wait
                     
+                    # 2. Payment mode select karna (Mobikwik / Amazon)
                     if pay_mode.lower() != "all":
                         try:
                             modes = await page.query_selector_all('*')
@@ -301,8 +303,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                     break
                         except Exception:
                             pass
-                        await asyncio.sleep(0.8)
+                        await asyncio.sleep(1.0) # Mode select hone ka wait
 
+                    # 3. Tips popup par 'OK' ya confirm click karna
                     try:
                         all_els = await page.query_selector_all('button, .van-button, div')
                         for el in all_els:
@@ -313,12 +316,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
                     
-                    await asyncio.sleep(2)
+                    # 4. Final payment page load hone ke liye poora 3-4 second ka wait taaki page pura khul jaye
+                    await asyncio.sleep(3.5)
+                    
                     shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Real Click & Order Grabbed!**\n💰 Amount: ₹{target_val}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Final Payment Page Reached & Grabbed!**\n💰 Amount: ₹{target_val}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
