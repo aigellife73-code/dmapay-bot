@@ -417,7 +417,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         chat_id=chat_id,
                         photo=shot,
                         caption=(
-                            f"🎉 **Bank Details Aa Gayi! Task Complete!**\n"
+                            f"🎉 **Bank Details Aa Gayi! Order Matched & Stopped!**\n"
                             f"💰 **Target:** `{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
@@ -457,7 +457,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         chat_id=chat_id,
                         photo=shot,
                         caption=(
-                            f"🎉 **Order Grabbed & Bank Details Opened!**\n"
+                            f"🎉 **Order Matched & Bank Details Opened!**\n"
                             f"💰 **Target:** `{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
@@ -548,8 +548,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🎯 **Order Match (₹{amt})! Buy Click Kiya Gaya!**\n"
-                                f"💳 Ab `{pay_mode}` select ho raha hai...\n"
+                                f"🎯 **Order Match Ho Gaya! (₹{amt})**\n"
+                                f"💳 `{pay_mode}` select ho raha hai...\n"
                                 f"⏱️ Timer: `{timer_str}` | 🔄 Retries: `{retry_count}`"
                             ),
                             parse_mode="Markdown"
@@ -557,52 +557,38 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # Wait for Wallet Popup or Tips popup
-                    popup_type = "none"
-                    for _ in range(12):
-                        await asyncio.sleep(0.2)
-                        body_txt = await page.evaluate("() => document.body.innerText")
-                        if "need to pay!" in body_txt or "Go pay" in body_txt:
-                            popup_type = "notify"
-                            break
-                        if "Failed to pick up order" in body_txt or "Please slow down" in body_txt:
-                            popup_type = "failed"
-                            break
-                        if "Pay using the following" in body_txt or "Manage UPI" in body_txt:
-                            popup_type = "success"
-                            break
-
-                    if popup_type == "failed":
-                        s_box = await page.evaluate(r"""
-                            () => {
-                                let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-                                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                if (stayBtn) {
-                                    stayBtn.click();
-                                    let r = stayBtn.getBoundingClientRect();
-                                    return {x: r.left, y: r.top, width: r.width, height: r.height};
-                                }
-                                return null;
-                            }
-                        """)
-                        if s_box:
-                            await tap_element_center(page, s_box)
-                        retry_count += 1
-                        await asyncio.sleep(0.4)
-                        continue
-
-                    if popup_type == "notify":
-                        continue
-
+                    # STEP 1 SCREENSHOT: Buy Click hone ke turant baad
                     await asyncio.sleep(0.4)
+                    try:
+                        shot_buy = await page.screenshot()
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=shot_buy,
+                            caption=f"📸 **Step 1: Buy Clicked (₹{amt})!**",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
 
                     # Select Wallet (Mobikwik/Amazon)
                     await click_wallet_option(page, pay_mode)
-                    await asyncio.sleep(0.4)
+                    await asyncio.sleep(0.5)
+
+                    # STEP 2 SCREENSHOT: Wallet select hone ke baad
+                    try:
+                        shot_wallet = await page.screenshot()
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=shot_wallet,
+                            caption=f"📸 **Step 2: `{pay_mode}` Selected (₹{amt})!**",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
 
                     # Handle 'OK' or 'Stay'
                     step_result = "unknown"
-                    for _ in range(10):
+                    for _ in range(12):
                         await asyncio.sleep(0.2)
                         body_txt = await page.evaluate("() => document.body.innerText")
                         
@@ -660,9 +646,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         await asyncio.sleep(0.5)
                         continue
 
-                    # Wait for Final Bank Details
+                    # Wait for Bank Details
                     bank_loaded = False
-                    for _ in range(20):
+                    for _ in range(25):
                         await asyncio.sleep(0.3)
                         cur_url = page.url
                         b_text = await page.evaluate("() => document.body.innerText")
@@ -702,7 +688,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         chat_id=chat_id,
                         photo=shot_final,
                         caption=(
-                            f"🎉 **Bank Details Aa Gayi! Auto-Buy Complete & Stopped!**\n"
+                            f"🎉 **Order Matched & Bank Details Opened!**\n"
                             f"💰 **Amount:** ₹{amt}\n"
                             f"💳 **Mode:** {pay_mode}\n"
                             f"🔗 **URL:** `{page.url}`\n"
