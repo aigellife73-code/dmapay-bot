@@ -149,7 +149,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         f"📱 **Account: `{phone}`**\n\n"
-        f"Ab **Target Amount ya Range** bhejein (jaise `700-1000` ya `1000`):",
+        f"Ab **Target Amount ya Range** bhejein (jaise `600-900` ya `1000`):",
         parse_mode="Markdown"
     )
 
@@ -197,7 +197,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
-        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `1000` ya `700-1000`):")
+        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `1000` ya `600-900`):")
         return
 
     context.user_data['target_amount'] = text.replace(" ", "")
@@ -240,87 +240,32 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     running_tasks[chat_id] = {"active": True}
     asyncio.create_task(run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, status_msg.message_id, context))
 
-async def tap_point(page, x, y):
-    try:
-        await page.touchscreen.tap(x, y)
-    except Exception:
-        pass
-    try:
-        await page.mouse.click(x, y)
-    except Exception:
-        pass
-
 async def click_wallet_option(page, pay_mode: str):
     mode = pay_mode.lower().strip()
-    coords = await page.evaluate(r"""
+    await page.evaluate(r"""
         (targetMode) => {
             let nodes = Array.from(document.querySelectorAll('div, span, p, li, label'));
-            let targetEl = null;
-            
             for (let el of nodes) {
                 let t = (el.innerText || '').trim().toLowerCase();
                 if (!t || t.startsWith('wallets:') || t.includes('pay using') || t.includes('manage upi')) continue;
-                
                 let r = el.getBoundingClientRect();
                 if (r.top < 260 || r.top > 750 || r.height > 80 || r.height < 12) continue;
                 
-                if (targetMode === 'mobikwik' && (t.includes('@mbk') || t === 'mobikwik')) {
-                    targetEl = el;
-                    if (t.includes('@mbk')) break;
-                } else if (targetMode === 'amazon' && (t.includes('@yapl') || t === 'amazon')) {
-                    targetEl = el;
-                    if (t.includes('@yapl')) break;
-                } else if (targetMode === 'all' && (t.includes('@') || t === 'mobikwik' || t === 'amazon')) {
-                    targetEl = el;
+                if ((targetMode === 'mobikwik' && (t.includes('@mbk') || t === 'mobikwik')) ||
+                    (targetMode === 'amazon' && (t.includes('@yapl') || t === 'amazon')) ||
+                    (targetMode === 'all' && (t.includes('@') || t === 'mobikwik' || t === 'amazon'))) {
+                    el.click();
+                    let row = el.parentElement;
+                    for (let i = 0; i < 3; i++) {
+                        if (!row) break;
+                        row.click();
+                        row = row.parentElement;
+                    }
                     break;
                 }
             }
-            
-            if (!targetEl) return null;
-            
-            let row = targetEl;
-            for (let i = 0; i < 4; i++) {
-                if (!row.parentElement) break;
-                let pr = row.parentElement.getBoundingClientRect();
-                if (pr.width >= 260 && pr.height <= 90) {
-                    row = row.parentElement;
-                    break;
-                }
-                row = row.parentElement;
-            }
-            
-            row.click();
-            targetEl.click();
-            
-            let children = row.querySelectorAll('*');
-            let radioRect = null;
-            for (let c of children) {
-                let cr = c.getBoundingClientRect();
-                if (cr.left > 300 && cr.width >= 10 && cr.width <= 45) {
-                    c.click();
-                    radioRect = {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
-                }
-            }
-            
-            let rr = row.getBoundingClientRect();
-            let cy = rr.top + rr.height / 2;
-            return {
-                textX: rr.left + 110,
-                centerX: rr.left + rr.width / 2,
-                radioX: radioRect ? radioRect.x : (rr.right - 25),
-                y: radioRect ? radioRect.y : cy
-            };
         }
     """, mode)
-
-    if coords:
-        await tap_point(page, coords["radioX"], coords["y"])
-        await asyncio.sleep(0.15)
-        await tap_point(page, coords["textX"], coords["y"])
-        await asyncio.sleep(0.15)
-        await tap_point(page, coords["centerX"], coords["y"])
-        return True
-    return False
 
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
     start_time = time.time()
@@ -333,7 +278,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             min_val = float(parts[0].strip())
             max_val = float(parts[1].strip())
         except:
-            min_val, max_val = 500.0, 1000.0
+            min_val, max_val = 600.0, 900.0
     else:
         try:
             min_val = max_val = float(target_amt.replace('₹','').strip())
@@ -396,34 +341,35 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(0.5)
                     continue
 
-                # 2. Match order and Click Buy button
+                # 2. Super Robust DOM Scanner for Price & Buy Button
                 clicked_order = await page.evaluate(r"""
                     ({minV, maxV}) => {
-                        let buyBtns = Array.from(document.querySelectorAll('button, div, span, a')).filter(el => {
-                            return (el.innerText || '').trim() === 'Buy' && el.children.length === 0;
-                        });
-                        
-                        for (let btn of buyBtns) {
-                            let rect = btn.getBoundingClientRect();
-                            if (rect.top < 150 || rect.top > 780 || rect.left < 200) continue;
-                            
-                            let card = btn.parentElement;
-                            for (let i = 0; i < 6; i++) {
-                                if (!card) break;
-                                let cText = card.innerText || '';
-                                if (cText.includes('Price') && cText.includes('₹')) {
-                                    let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
-                                    if (m && m[1]) {
-                                        let val = parseFloat(m[1].replace(/,/g, ''));
-                                        if (val >= minV && val <= maxV) {
-                                            btn.click();
-                                            card.click();
-                                            return {found: true, amount: val};
+                        // Find all elements containing '₹'
+                        let allEls = Array.from(document.querySelectorAll('*'));
+                        for (let el of allEls) {
+                            let txt = el.innerText || '';
+                            if (txt.includes('₹') && !txt.includes('Reward') && txt.length < 50) {
+                                let m = txt.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
+                                if (m && m[1]) {
+                                    let val = parseFloat(m[1].replace(/,/g, ''));
+                                    if (val >= minV && val <= maxV) {
+                                        // Now find the nearest Buy button within this order container
+                                        let container = el.parentElement;
+                                        for (let i = 0; i < 5; i++) {
+                                            if (!container) break;
+                                            let buyBtn = Array.from(container.querySelectorAll('button, div, span, a')).find(b => (b.innerText || '').trim() === 'Buy' && b.children.length === 0);
+                                            if (buyBtn) {
+                                                let rect = buyBtn.getBoundingClientRect();
+                                                if (rect.top > 150 && rect.top < 780 && rect.left > 200) {
+                                                    buyBtn.click();
+                                                    container.click();
+                                                    return {found: true, amount: val};
+                                                }
+                                            }
+                                            container = container.parentElement;
                                         }
                                     }
-                                    break;
                                 }
-                                card = card.parentElement;
                             }
                         }
                         return {found: false};
@@ -433,7 +379,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 if clicked_order and clicked_order.get("found"):
                     amt = clicked_order.get("amount")
                     
-                    # TURANT STATUS UPDATE AUR SCREENSHOT BHEJEIN
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
@@ -488,7 +433,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     """)
 
                     if is_failed:
-                        # Agar order miss ho gaya toh bot loop band nahi karega, balki agla order dhoondhega
                         await asyncio.sleep(0.5)
                         continue
 
@@ -503,7 +447,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             break
 
                     if bank_page_reached:
-                        running_tasks[chat_id]["active"] = False # STOP BOT PERMANENTLY
+                        running_tasks[chat_id]["active"] = False
                         await asyncio.sleep(1.0)
                         shot_final = await page.screenshot(full_page=True)
                         await context.bot.send_photo(
