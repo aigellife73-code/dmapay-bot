@@ -85,7 +85,6 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
         if not uid or not phone or not fid:
             return
         
-        # Check if already loaded in local file
         existing_accs = get_user_accounts(int(uid))
         if ts <= last_sync_ts and phone in existing_accs:
             return
@@ -100,7 +99,7 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
             if is_new_sync:
                 await context.bot.send_message(
                     chat_id=int(uid),
-                    text=f"✅ **Account `{phone}` Sync Ho Gaya!**\n\nAb `/start` dabakar अपना account select karein.",
+                    text=f"✅ **Account `{phone}` Sync Ho Gaya!**\n\nAb `/start` dabayein.",
                     parse_mode="Markdown"
                 )
     except Exception:
@@ -113,9 +112,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
     
-    # Startup par cloud se session restore check karein
     await poll_bookmark_sync(context)
-    
     context.user_data.clear()
     accounts = get_user_accounts(user.id)
     
@@ -163,7 +160,6 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.effective_chat.id)
     state = context.user_data.get('state', '')
 
-    # Rule 1: Agar user ne 10-digit Phone Number bheja hai (chahe button dabaya ho ya nahi)
     if (text.isdigit() and len(text) == 10) or state == 'WAIT_PHONE':
         if not text.isdigit() or len(text) != 10:
             await update.message.reply_text("❌ Kripya sahi **10-digit Phone Number** dalein:", parse_mode="Markdown")
@@ -171,20 +167,16 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         context.user_data['state'] = ''
         bm = generate_user_bookmarklet(chat_id, text)
-        
-        # Check if already synced in cloud
         await poll_bookmark_sync(context)
         accounts = get_user_accounts(int(chat_id))
         extra_btn = []
         if text in accounts:
-            extra_btn.append([InlineKeyboardButton(f"🚀 Direct Setup {text} (Already Synced)", callback_data=f"setup_{text}")])
+            extra_btn.append([InlineKeyboardButton(f"🚀 Direct Setup {text} (Synced)", callback_data=f"setup_{text}")])
         
         msg = (
             f"✅ **Number `{text}` Registered!**\n\n"
             f"🔖 **Auto-Login Bookmark Code:**\n\n`{bm}`\n\n"
-            f"📌 **Steps:**\n"
-            f"1. `web.dmapay.vip` par `{text}` login karke upar wala Bookmark run karein.\n"
-            f"2. Sync hote hi `/start` dabayein!"
+            f"📌 web.dmapay.vip par login karke bookmark run karein."
         )
         await update.message.reply_text(
             msg,
@@ -193,17 +185,15 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Rule 2: Agar user ne Amount ya Range bheja hai
     active_phone = context.user_data.get('active_phone')
     if not active_phone:
-        # Check if user already has 1 synced account, auto-select it
         await poll_bookmark_sync(context)
         accounts = get_user_accounts(int(chat_id))
         if len(accounts) == 1:
             active_phone = list(accounts.keys())[0]
             context.user_data['active_phone'] = active_phone
         else:
-            await update.message.reply_text("⚠️ Pehle `/start` dabakar apna Account select karein ya 10-digit Mobile Number bhejein!")
+            await update.message.reply_text("⚠️ Pehle `/start` dabakar Account select karein ya 10-digit number bhejein!")
             return
 
     if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
@@ -267,10 +257,8 @@ async def tap_element_center(page, box):
 
 async def click_wallet_option(page, pay_mode: str):
     mode = pay_mode.lower().strip()
-    # Exact row aur radio circle coordinate nikalna
     coords = await page.evaluate(r"""
         (targetMode) => {
-            // Find the UPI ID text like @mbk or @yapl or wallet title inside popup
             let nodes = Array.from(document.querySelectorAll('div, span, p, li, label'));
             let targetEl = null;
             
@@ -295,7 +283,6 @@ async def click_wallet_option(page, pay_mode: str):
             
             if (!targetEl) return null;
             
-            // Climb up to the full horizontal item row (width > 250)
             let row = targetEl;
             for (let i = 0; i < 4; i++) {
                 if (!row.parentElement) break;
@@ -310,12 +297,10 @@ async def click_wallet_option(page, pay_mode: str):
             row.click();
             targetEl.click();
             
-            // Click any radio circle or icon inside the row
             let children = row.querySelectorAll('*');
             let radioRect = null;
             for (let c of children) {
                 let cr = c.getBoundingClientRect();
-                // Right side radio circle (x > 300)
                 if (cr.left > 300 && cr.width >= 10 && cr.width <= 45) {
                     c.click();
                     radioRect = {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
@@ -334,12 +319,10 @@ async def click_wallet_option(page, pay_mode: str):
     """, mode)
 
     if coords:
-        # 1. Tap on Radio Circle on the right
         await tap_point(page, coords["radioX"], coords["y"])
-        await asyncio.sleep(0.2)
-        # 2. Tap on Text / Center of row
+        await asyncio.sleep(0.15)
         await tap_point(page, coords["textX"], coords["y"])
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.15)
         await tap_point(page, coords["centerX"], coords["y"])
         return True
     return False
@@ -360,7 +343,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
         try:
             min_val = max_val = float(target_amt.replace('₹','').strip())
         except:
-            min_val = max_val = 1000.0
+            min_val, max_val = 1000.0
 
     try:
         async with async_playwright() as p:
@@ -405,6 +388,29 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
+                # 1. Check if 'Failed to pick up order' Tips popup is present
+                popup_handled = await page.evaluate(r"""
+                    () => {
+                        let divs = Array.from(document.querySelectorAll('div, span, p'));
+                        for (let d of divs) {
+                            let t = (d.innerText || '').trim();
+                            if (t.includes('Failed to pick up order') || t === 'Tips') {
+                                // Find 'Stay' button inside popup
+                                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                                if (stayBtn) {
+                                    stayBtn.click();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                """)
+
+                if popup_handled:
+                    await asyncio.sleep(0.8) # Wait after clicking Stay
+                    continue # Continue scanning next order immediately
+
                 target_info = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let allEls = Array.from(document.querySelectorAll('button, div, span, a'));
@@ -445,25 +451,55 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """, {"minV": min_val, "maxV": max_val})
 
                 if target_info and target_info.get("found"):
-                    # 1. Tap Buy Button
                     await tap_element_center(page, target_info["box"])
                     
-                    # Wait for bottom popup
+                    # Wait for bottom popup or Failed popup
+                    popup_type = "none"
                     for _ in range(15):
                         await asyncio.sleep(0.3)
                         body_txt = await page.evaluate("() => document.body.innerText")
+                        if "Failed to pick up order" in body_txt:
+                            popup_type = "failed"
+                            break
                         if "Pay using the following" in body_txt or "Manage UPI" in body_txt:
+                            popup_type = "success"
                             break
                     
+                    if popup_type == "failed":
+                        # Click 'Stay' and loop back to scan next
+                        await page.evaluate(r"""
+                            () => {
+                                let divs = Array.from(document.querySelectorAll('div, span, p'));
+                                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                                if (stayBtn) stayBtn.click();
+                            }
+                        """)
+                        await asyncio.sleep(0.5)
+                        continue
+
                     await asyncio.sleep(0.6)
 
-                    # 2. Select Mobikwik / Amazon & wait for 'Tips' dialog ("OK")
+                    # Select wallet & OK confirmation
                     tips_done = False
                     for _ in range(4):
                         await click_wallet_option(page, pay_mode)
                         
                         for _ in range(8):
                             await asyncio.sleep(0.3)
+                            
+                            # Check if 'Failed to pick up order' appeared during wallet selection
+                            body_txt = await page.evaluate("() => document.body.innerText")
+                            if "Failed to pick up order" in body_txt:
+                                await page.evaluate(r"""
+                                    () => {
+                                        let divs = Array.from(document.querySelectorAll('div, span, p'));
+                                        let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                                        if (stayBtn) stayBtn.click();
+                                    }
+                                """)
+                                tips_done = "failed_retry"
+                                break
+
                             ok_box = await page.evaluate(r"""
                                 () => {
                                     let btns = Array.from(document.querySelectorAll('button, div, span'));
@@ -489,10 +525,16 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                 tips_done = True
                                 break
                         
+                        if tips_done == "failed_retry":
+                            break
                         if tips_done:
                             break
 
-                    # 3. Wait for #/buyingbymod and bank details to populate
+                    if tips_done == "failed_retry":
+                        await asyncio.sleep(0.5)
+                        continue
+
+                    # Wait for #/buyingbymod and bank details
                     for _ in range(25):
                         await asyncio.sleep(0.4)
                         cur_url = page.url
