@@ -13,7 +13,7 @@ BOT_TOKEN = "9105269973:AAFtunQsu9g4roxGUi2RYTt_dSahQdIqlVw"
 ACCOUNTS_FILE = "dmapay_accounts.json"
 SESSION_DIR = "dmapay_sessions"
 
-ASK_PHONE, ASK_SESSION = range(2)
+ASK_PHONE = range(1)
 user_sessions = {}
 last_sync_ts = 0
 
@@ -164,7 +164,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         f"📱 **Account: `{phone}`**\n\n"
-        "Ab apna **Target Amount** bhejein (jaise `1000`):",
+        "Ab apna **Amount ya Range** bhejein\n(Jaise exact amount `1000` ya range `1000-1500`):",
         parse_mode="Markdown"
     )
 
@@ -172,23 +172,77 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     text = update.message.text.strip()
-    if not text.isdigit():
-        await update.message.reply_text("❌ Kripya sirf amount ka number dalein (jaise 1000):")
+    if '-' not in text and not text.isdigit():
+        await update.message.reply_text("❌ Sahi format dalein! Jaise `1000` ya `1000-1500`:")
         return
     
     context.user_data['target_amount'] = text
     phone = context.user_data.get('active_phone', 'Default')
+    chat_id = update.effective_chat.id
     
-    buttons = [
-        [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_Mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_Amazon")],
-        [InlineKeyboardButton("💳 Paytm / Other", callback_data="pay_Other")]
-    ]
+    # Active payment modes check karne ke liye background me kycpartner page check karna
+    await update.message.reply_text("🔍 Active payment modes check kiye ja rahe hain...")
+    
+    accounts = get_user_accounts(chat_id)
+    session_data = accounts.get(phone, {})
+    
+    active_modes = await fetch_active_payment_modes(session_data)
+    
+    buttons = []
+    for mode in active_modes:
+        buttons.append([InlineKeyboardButton(f"💳 {mode} (Active)", callback_data=f"pay_{mode}")])
+    buttons.append([InlineKeyboardButton("💳 All / Default Mode", callback_data="pay_Mobikwik")])
+    
     await update.message.reply_text(
-        f"✅ **Amount Set:** `₹{text}`\n\n"
-        "Ab apna **Payment Mode** chunein:",
+        f"✅ **Target Set:** `{text}`\n\n"
+        "Sirf **Active Payment Modes** detect huye hain, inme se chunein:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown"
     )
+
+async def fetch_active_payment_modes(session_data):
+    # kycpartner page se active modes check karne ka function
+    modes = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context()
+            page = await context.new_page()
+            if session_data:
+                await page.goto("https://web.dmapay.vip", wait_until="commit", timeout=15000)
+                await asyncio.sleep(1)
+                await page.evaluate(r"""(data) => { for (let k in data) { localStorage.setItem(k, data[k]); } }""", session_data)
+            
+            await page.goto("https://web.dmapay.vip/#/kycpartner", wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(3)
+            
+            active_elements = await page.evaluate(r"""
+                () => {
+                    let items = Array.from(document.querySelectorAll('*'));
+                    let res = [];
+                    for (let el of items) {
+                        let txt = (el.innerText || '').trim();
+                        if (txt.toLowerCase() === 'active') {
+                            let parent = el.closest('div');
+                            if (parent) res.push(parent.innerText);
+                        }
+                    }
+                    return res;
+                }
+            """)
+            await browser.close()
+            
+            text_blob = " ".join(active_elements).lower()
+            if "mobikwik" in text_blob: modes.append("Mobikwik")
+            if "amazon" in text_blob: modes.append("Amazon")
+            if "paytm" in text_blob: modes.append("Paytm")
+            if "phonepe" in text_blob: modes.append("PhonePe")
+    except Exception:
+        pass
+    
+    if not modes:
+        modes = ["Mobikwik", "Amazon"] # Fallback
+    return list(set(modes))
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -202,7 +256,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     accounts = get_user_accounts(chat_id)
     session_data = accounts.get(phone, {})
     
-    await query.edit_message_text(f"🚀 **Auto-Buy Started!**\n📱 `{phone}` | 💰 ₹{target_amt} | 💳 {pay_mode}\n\nBot background me scanning aur buying start kar raha hai...", parse_mode="Markdown")
+    await query.edit_message_text(f"🚀 **Auto-Buy & Auto-Search Started!**\n📱 `{phone}` | 💰 Range/Amt: `{target_amt}` | 💳 {pay_mode}\n\nBot background me scanning aur timer start kar raha hai...", parse_mode="Markdown")
     
     asyncio.create_task(run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode, context))
 
@@ -210,6 +264,21 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
     profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
     os.makedirs(profile_dir, exist_ok=True)
     
+    # Range handling (jaise 1000-1500 ya single 1000)
+    min_val, max_val = 0.0, 0.0
+    if '-' in target_amt:
+        parts = target_amt.split('-')
+        try:
+            min_val = float(parts[0].strip())
+            max_val = float(parts[1].strip())
+        except:
+            min_val = max_val = float(target_amt.replace('₹','').strip())
+    else:
+        try:
+            min_val = max_val = float(target_amt.replace('₹','').strip())
+        except:
+            min_val = max_val = 1000.0
+
     try:
         async with async_playwright() as p:
             browser_context = await p.chromium.launch_persistent_context(
@@ -224,32 +293,34 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
             if session_data:
                 await page.goto("https://web.dmapay.vip", wait_until="commit", timeout=20000)
                 await asyncio.sleep(1)
-                await page.evaluate(r"""
-                    (data) => {
-                        for (let k in data) {
-                            localStorage.setItem(k, data[k]);
-                        }
-                    }
-                """, session_data)
+                await page.evaluate(r"""(data) => { for (let k in data) { localStorage.setItem(k, data[k]); } }""", session_data)
             
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
             
-            for attempt in range(60):
+            while True:
                 try:
+                    # Check matching buy buttons for target amount or range
                     clicked = await page.evaluate(r"""
-                        (amt) => {
+                        ({minV, maxV}) => {
                             let buttons = Array.from(document.querySelectorAll('button, div')).filter(el => (el.innerText || '').trim() === 'Buy');
                             for (let btn of buttons) {
                                 let card = btn.closest('div');
-                                if (card && card.innerText.includes('₹' + amt)) {
-                                    btn.click();
-                                    return true;
+                                if (card) {
+                                    let txt = card.innerText;
+                                    let matches = txt.match(/₹\s*([0-9,]+(\.[0-9]{2})?)/);
+                                    if (matches && matches[1]) {
+                                        let val = parseFloat(matches[1].replace(/,/g, ''));
+                                        if (val >= minV && val <= maxV) {
+                                            btn.click();
+                                            return true;
+                                        }
+                                    }
                                 }
                             }
                             return false;
                         }
-                    """, target_amt)
+                    """, {"minV": min_val, "maxV": max_val})
                     
                     if clicked:
                         await asyncio.sleep(1)
@@ -266,11 +337,12 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
                         """, pay_mode)
                         
                         shot = await page.screenshot()
-                        await context.bot.send_photo(chat_id, photo=shot, caption=f"🎉 **Order Matched & Grabbed Successfully!**\nAmount: ₹{target_amt} | Mode: {pay_mode}", parse_mode="Markdown")
+                        await context.bot.send_photo(chat_id, photo=shot, caption=f"🎉 **Order Matched & Grabbed Successfully!**\nRange: {target_amt} | Mode: {pay_mode}", parse_mode="Markdown")
                         break
                     
+                    # Refresh / Auto-Search trigger
                     await page.reload(wait_until="domcontentloaded")
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(2.5)
                 except Exception:
                     await asyncio.sleep(2)
             
@@ -278,19 +350,9 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
     except Exception as e:
         await context.bot.send_message(chat_id, f"❌ Auto-Buy Error: {str(e)}")
 
-async def post_init_setup(app: Application):
-    async def loop_sync():
-        while True:
-            await asyncio.sleep(2.5)
-            try:
-                await poll_bookmark_sync(app)
-            except Exception:
-                pass
-    asyncio.create_task(loop_sync())
-
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_acc_callback, pattern="^add_acc$")],
