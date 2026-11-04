@@ -189,7 +189,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Started!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Searching orders...\n\n"
+        f"🔍 **Status:** Browser open ho raha hai...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -239,8 +239,17 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 await asyncio.sleep(1)
                 await page.evaluate(r"""(data) => { for (let k in data) { localStorage.setItem(k, data[k]); } }""", session_data)
 
-            await page.goto("https://web.dmapay.vip/#/buy", wait_until="networkidle")
-            await asyncio.sleep(2)
+            await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+
+            # Pehla debug screenshot taaki pata chale browser khula ya nahi
+            init_shot = await page.screenshot()
+            await context.bot.send_photo(
+                chat_id=chat_id,
+                photo=init_shot,
+                caption=f"🔍 **Debug Screenshot:** Browser successfully open ho gaya hai aur page load ho gaya hai!",
+                parse_mode="Markdown"
+            )
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -248,28 +257,22 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # Strict Matcher for exact Card layout seen in DMA Pay screenshot
+                # Order matching logic
                 matched = await page.evaluate(r"""
                     ({minV, maxV}) => {
-                        let allBuyBtns = Array.from(document.querySelectorAll('*')).filter(el => {
-                            return (el.innerText || '').trim() === 'Buy' && el.children.length === 0;
+                        let cards = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
+                            let t = el.innerText || '';
+                            return t.includes('Price') && t.includes('Buy');
                         });
                         
-                        for (let btn of allBuyBtns) {
-                            // Find card container (go up 2-4 levels)
-                            let card = btn.parentElement;
-                            for (let i = 0; i < 4; i++) {
-                                if (card && card.innerText && card.innerText.includes('Price')) break;
-                                if (card) card = card.parentElement;
-                            }
-                            
-                            if (card && card.innerText) {
-                                let txt = card.innerText;
-                                // Regex matching '₹ 950' or 'Price \n ₹ 950'
-                                let m = txt.match(/₹\s*([0-9]+(\.[0-9]+)?)/);
-                                if (m && m[1]) {
-                                    let val = parseFloat(m[1]);
-                                    if (val >= minV && val <= maxV) {
+                        for (let card of cards) {
+                            let txt = card.innerText;
+                            let m = txt.match(/₹\s*([0-9]+(\.[0-9]+)?)/);
+                            if (m && m[1]) {
+                                let val = parseFloat(m[1]);
+                                if (val >= minV && val <= maxV) {
+                                    let btn = Array.from(card.querySelectorAll('button, div')).find(b => (b.innerText || '').trim() === 'Buy');
+                                    if (btn) {
                                         btn.click();
                                         return {found: true, amount: val};
                                     }
@@ -283,7 +286,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 if matched and matched.get("found"):
                     await asyncio.sleep(1.2)
                     
-                    # Payment mode click if not all
                     if pay_mode.lower() != "all":
                         await page.evaluate(r"""
                             (mode) => {
@@ -299,35 +301,30 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Order Buy Clicked Successfully!**\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Order Buy Clicked Successfully!**[span_1](start_span)[span_1](end_span)\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
 
-                # UI message update every 3 scans
-                if scan_count % 3 == 0:
+                if scan_count % 2 == 0:
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active!**\n"
+                                f"🚀 **Auto-Buy Active!**[span_2](start_span)[span_2](end_span)\n"
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
-                                f"⏱️ **Live Timer:** `{timer_str}`\n"
-                                f"🔄 **Scans Done:** `{scan_count} baar`\n"
-                                f"🔍 **Status:** Searching orders on page...\n\n"
-                                f"🛑 Rokne ke liye `/stop` bhejein."
+                                f"⏱️ **Live Timer:** `{timer_str}`[span_3](start_span)[span_3](end_span)\n"
+                                f"🔄 **Scans Done:** `{scan_count} baar`[span_4](start_span)[span_4](end_span)\n"
+                                f"🔍 **Status:** Orders scan ho rahe hain...\n\n"
+                                f"🛑 Rokne ke liye `/stop` bhejein[span_5](start_span)[span_5](end_span)."
                             ),
                             parse_mode="Markdown"
                         )
                     except Exception:
                         pass
 
-                # SPA refresh without losing tab state
-                await page.evaluate(r"""() => {
-                    let refreshIcon = document.querySelector('.van-pull-refresh, i.van-icon-replay');
-                    if (refreshIcon) refreshIcon.click();
-                }""")
+                await page.reload(wait_until="domcontentloaded")
                 await asyncio.sleep(2)
 
             await browser.close()
