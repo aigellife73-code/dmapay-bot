@@ -1,4 +1,4 @@
-import asyncio, json, os, threading, time
+import asyncio, json, os, threading, time, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -13,8 +13,6 @@ SESSION_DIR = "dmapay_sessions"
 
 ASK_PHONE = range(1)
 last_sync_ts = 0
-
-# Active tasks track karne ke liye
 running_tasks = {}
 
 class DummyServer(BaseHTTPRequestHandler):
@@ -99,7 +97,7 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
             await context.bot.set_my_description(description="", language_code="zu")
             await context.bot.send_message(
                 chat_id=int(uid),
-                text=f"✅ **Account `{phone}` ka Login Session Sync Ho Gaya!**\n\nAb `/start` dabakar auto-buy shuru karein.",
+                text=f"✅ **Account `{phone}` Sync Ho Gaya!**\n\nAb `/start` dabayein.",
                 parse_mode="Markdown"
             )
     except Exception:
@@ -111,15 +109,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
-    user_id = user.id
     
     context.user_data.clear()
-    accounts = get_user_accounts(user_id)
+    accounts = get_user_accounts(user.id)
     
     buttons = []
     for phone in accounts.keys():
         buttons.append([InlineKeyboardButton(f"📱 {phone} (Auto-Buy Setup)", callback_data=f"setup_{phone}")])
-    
     buttons.append([InlineKeyboardButton("➕ Add Account / Sync", callback_data="add_acc")])
     
     txt = "🤖 **DMAPay Auto-Buy Bot**\n\nApna account chunein ya naya jodein:"
@@ -132,9 +128,9 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in running_tasks:
         running_tasks[chat_id]["active"] = False
-        await update.message.reply_text("🛑 **Auto-Buy Scanning Rok Di Gayi Hai!**\n\nDubara start karne ke liye `/start` karein.", parse_mode="Markdown")
+        await update.message.reply_text("🛑 **Auto-Buy Scanning Rok Di Gayi!**", parse_mode="Markdown")
     else:
-        await update.message.reply_text("ℹ️ Koi bhi auto-buy task abhi running nahi hai. `/start` karein.")
+        await update.message.reply_text("ℹ️ Koi task active nahi hai.")
 
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -148,32 +144,28 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sahi 10-digit number dalein:", reply_markup=ReplyKeyboardRemove())
         return ASK_PHONE
     chat_id = str(update.effective_chat.id)
-    
     bm = generate_user_bookmarklet(chat_id, phone)
     msg = (
-        f"✅ **Number `{phone}` Register Ho Gaya!**\n\n"
-        f"🔖 **Auto-Login Bookmark Code:**\n\n"
-        f"`{bm}`\n\n"
-        f"📌 Portal (`web.dmapay.vip`) par login karke ye Bookmark run karein."
+        f"✅ **Number `{phone}` Registered!**\n\n"
+        f"🔖 **Auto-Login Bookmark:**\n\n`{bm}`\n\n"
+        f"📌 web.dmapay.vip login karke bookmark run karein."
     )
     await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
     return ConversationHandler.END
 
 async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
-    phone = data.replace("setup_", "")
+    phone = query.data.replace("setup_", "")
     context.user_data['active_phone'] = phone
-    
     await query.answer()
-    await query.edit_message_text(f"📱 **Account: `{phone}`**\n\nTarget Amount ya Range dalein (jaise exact `1000` ya range `700-1000`):", parse_mode="Markdown")
+    await query.edit_message_text(f"📱 **Account: `{phone}`**\n\nTarget Amount ya Range dalein (jaise `700-1000` ya `950`):", parse_mode="Markdown")
 
 async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     text = update.message.text.strip()
     if '-' not in text and not text.isdigit():
-        await update.message.reply_text("❌ Sahi format dalein! Jaise `1000` ya `700-1000`:")
+        await update.message.reply_text("❌ Format galat hai! Jaise `700-1000` ya `950` dalein:")
         return
     
     context.user_data['target_amount'] = text
@@ -181,13 +173,11 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_Mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_Amazon")],
         [InlineKeyboardButton("💳 All Modes", callback_data="pay_All")]
     ]
-    await update.message.reply_text(f"✅ **Target Set:** `{text}`\n\nApna **Payment Mode** chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await update.message.reply_text(f"✅ **Target Set:** `{text}`\n\nPayment Mode chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    data = query.data
-    pay_mode = data.replace("pay_", "")
-    
+    pay_mode = query.data.replace("pay_", "")
     chat_id = update.effective_chat.id
     phone = context.user_data.get('active_phone', '')
     target_amt = context.user_data.get('target_amount', '1000')
@@ -196,29 +186,25 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
     
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Active!**\n"
+        f"🚀 **Auto-Buy Started!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
-        f"⏱️ **Timer:** `00:00`\n"
-        f"🔍 **Status:** Scanning shuru ho rahi hai...\n"
+        f"⏱️ **Live Timer:** `00:00`\n"
+        f"🔍 **Status:** Searching orders...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
     
-    # Purana chal raha ho toh band karein
     if chat_id in running_tasks:
         running_tasks[chat_id]["active"] = False
         await asyncio.sleep(1)
         
     running_tasks[chat_id] = {"active": True}
-    
-    # Background execution loop start
     asyncio.create_task(run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, status_msg.message_id, context))
 
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
     start_time = time.time()
     scan_count = 0
     
-    # Amount Range parse karein
     min_val, max_val = 0.0, 0.0
     if '-' in target_amt:
         parts = target_amt.split('-')
@@ -226,7 +212,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             min_val = float(parts[0].strip())
             max_val = float(parts[1].strip())
         except:
-            min_val = max_val = 1000.0
+            min_val, max_val = 700.0, 1000.0
     else:
         try:
             min_val = max_val = float(target_amt.replace('₹','').strip())
@@ -248,13 +234,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             )
             page = await browser_context.new_page()
 
-            # Session inject
             if session_data:
                 await page.goto("https://web.dmapay.vip", wait_until="commit", timeout=20000)
                 await asyncio.sleep(1)
                 await page.evaluate(r"""(data) => { for (let k in data) { localStorage.setItem(k, data[k]); } }""", session_data)
 
-            await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
+            await page.goto("https://web.dmapay.vip/#/buy", wait_until="networkidle")
             await asyncio.sleep(2)
 
             while running_tasks.get(chat_id, {}).get("active", False):
@@ -263,17 +248,27 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # Order check and click
+                # Strict Matcher for exact Card layout seen in DMA Pay screenshot
                 matched = await page.evaluate(r"""
-                    ({minV, maxV, mode}) => {
-                        let buttons = Array.from(document.querySelectorAll('button, div')).filter(el => (el.innerText || '').trim() === 'Buy');
-                        for (let btn of buttons) {
-                            let card = btn.closest('div');
-                            if (card) {
+                    ({minV, maxV}) => {
+                        let allBuyBtns = Array.from(document.querySelectorAll('*')).filter(el => {
+                            return (el.innerText || '').trim() === 'Buy' && el.children.length === 0;
+                        });
+                        
+                        for (let btn of allBuyBtns) {
+                            // Find card container (go up 2-4 levels)
+                            let card = btn.parentElement;
+                            for (let i = 0; i < 4; i++) {
+                                if (card && card.innerText && card.innerText.includes('Price')) break;
+                                if (card) card = card.parentElement;
+                            }
+                            
+                            if (card && card.innerText) {
                                 let txt = card.innerText;
-                                let matches = txt.match(/₹\s*([0-9,]+(\.[0-9]{2})?)/);
-                                if (matches && matches[1]) {
-                                    let val = parseFloat(matches[1].replace(/,/g, ''));
+                                // Regex matching '₹ 950' or 'Price \n ₹ 950'
+                                let m = txt.match(/₹\s*([0-9]+(\.[0-9]+)?)/);
+                                if (m && m[1]) {
+                                    let val = parseFloat(m[1]);
                                     if (val >= minV && val <= maxV) {
                                         btn.click();
                                         return {found: true, amount: val};
@@ -283,34 +278,33 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         }
                         return {found: false};
                     }
-                """, {"minV": min_val, "maxV": max_val, "mode": pay_mode})
+                """, {"minV": min_val, "maxV": max_val})
 
                 if matched and matched.get("found"):
-                    await asyncio.sleep(1)
-                    # Mode select
+                    await asyncio.sleep(1.2)
+                    
+                    # Payment mode click if not all
                     if pay_mode.lower() != "all":
                         await page.evaluate(r"""
                             (mode) => {
-                                let items = Array.from(document.querySelectorAll('*'));
-                                for (let opt of items) {
-                                    if ((opt.innerText || '').toLowerCase().includes(mode.toLowerCase())) {
-                                        opt.click();
-                                        break;
-                                    }
-                                }
+                                let opts = Array.from(document.querySelectorAll('*')).filter(el => {
+                                    return (el.innerText || '').toLowerCase().includes(mode.toLowerCase()) && el.children.length === 0;
+                                });
+                                if (opts.length > 0) opts[0].click();
                             }
                         """, pay_mode)
                     
+                    await asyncio.sleep(1)
                     shot = await page.screenshot()
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Order Mil Gaya Aur Grab Kar Liya!**\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Order Buy Clicked Successfully!**\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
 
-                # Timer & Status update in Telegram message
+                # UI message update every 3 scans
                 if scan_count % 3 == 0:
                     try:
                         await context.bot.edit_message_text(
@@ -321,7 +315,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans Done:** `{scan_count} baar`\n"
-                                f"🔍 **Status:** Searching new orders...\n\n"
+                                f"🔍 **Status:** Searching orders on page...\n\n"
                                 f"🛑 Rokne ke liye `/stop` bhejein."
                             ),
                             parse_mode="Markdown"
@@ -329,7 +323,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                await page.reload(wait_until="domcontentloaded")
+                # SPA refresh without losing tab state
+                await page.evaluate(r"""() => {
+                    let refreshIcon = document.querySelector('.van-pull-refresh, i.van-icon-replay');
+                    if (refreshIcon) refreshIcon.click();
+                }""")
                 await asyncio.sleep(2)
 
             await browser.close()
