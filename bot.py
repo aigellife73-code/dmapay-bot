@@ -170,8 +170,8 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     context.user_data['target_amount'] = text
     buttons = [
-        [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_Mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_Amazon")],
-        [InlineKeyboardButton("💳 All Modes", callback_data="pay_All")]
+        [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_amazon")],
+        [InlineKeyboardButton("💳 Any / First Available", callback_data="pay_all")]
     ]
     await update.message.reply_text(f"✅ **Target Set:** `{text}`\n\nPayment Mode chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
@@ -189,7 +189,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Scanning & Auto-Clicking active...\n\n"
+        f"🔍 **Status:** Browser starting...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -200,6 +200,18 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         
     running_tasks[chat_id] = {"active": True}
     asyncio.create_task(run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, status_msg.message_id, context))
+
+async def tap_element_center(page, box):
+    cx = box["x"] + box["width"] / 2
+    cy = box["y"] + box["height"] / 2
+    try:
+        await page.touchscreen.tap(cx, cy)
+    except Exception:
+        pass
+    try:
+        await page.mouse.click(cx, cy)
+    except Exception:
+        pass
 
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
     start_time = time.time()
@@ -219,9 +231,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
         except:
             min_val, max_val = 1000.0
 
-    profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
-    os.makedirs(profile_dir, exist_ok=True)
-
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(
@@ -230,7 +239,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             )
             browser_context = await browser.new_context(
                 viewport={"width": 390, "height": 844},
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                has_touch=True,
+                is_mobile=True
             )
             page = await browser_context.new_page()
 
@@ -242,18 +253,21 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Sahi range ka tab click karna
+            # Filter chip select karna
+            chip_text = None
             if max_val <= 999:
-                await page.evaluate(r"""() => {
-                    let tabs = Array.from(document.querySelectorAll('*')).filter(el => (el.innerText || '').trim() === '0~999');
-                    if (tabs.length > 0) tabs[0].click();
-                }""")
-            elif min_val >= 1000:
-                await page.evaluate(r"""() => {
-                    let tabs = Array.from(document.querySelectorAll('*')).filter(el => (el.innerText || '').trim() === '1000~2999');
-                    if (tabs.length > 0) tabs[0].click();
-                }""")
-            await asyncio.sleep(1.5)
+                chip_text = "0~999"
+            elif min_val >= 1000 and max_val <= 2999:
+                chip_text = "1000~2999"
+            
+            if chip_text:
+                try:
+                    chip_loc = page.get_by_text(chip_text, exact=True).first
+                    if await chip_loc.count() > 0:
+                        await chip_loc.click(force=True)
+                        await asyncio.sleep(1.5)
+                except Exception:
+                    pass
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -261,69 +275,135 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                matched_btn = None
-                target_val = 0.0
-                try:
-                    cards = await page.query_selector_all('div, section, article')
-                    for card in cards:
-                        try:
-                            txt = await card.inner_text()
-                            if 'Price' in txt and 'Buy' in txt:
-                                m = re.search(r'₹\s*([0-9]+(\.[0-9]+)?)', txt)
-                                if m:
-                                    val = float(m.group(1))
-                                    if min_val <= val <= max_val:
-                                        btns = await card.query_selector_all('button, div')
-                                        for b in btns:
-                                            b_txt = (await b.inner_text()).strip()
-                                            if b_txt == 'Buy':
-                                                matched_btn = b
-                                                target_val = val
-                                                break
-                        except Exception:
-                            continue
-                        if matched_btn:
+                # Sirf ASLI Order Card ke Buy button ka exact coordinate nikalna
+                # Header (y < 180) aur Bottom Nav (y > 760) ke 'Buy' ko ignore karega
+                target_info = await page.evaluate(r"""
+                    ({minV, maxV}) => {
+                        let allEls = Array.from(document.querySelectorAll('button, div, span, a'));
+                        for (let el of allEls) {
+                            let directText = '';
+                            for (let node of el.childNodes) {
+                                if (node.nodeType === 3) directText += node.nodeValue;
+                            }
+                            if (directText.trim() !== 'Buy') continue;
+                            
+                            let rect = el.getBoundingClientRect();
+                            // Order list beech me hoti hai (y: 180 se 750) aur Buy button right side (x > 250)
+                            if (rect.top < 180 || rect.top > 750 || rect.left < 240 || rect.width < 30) continue;
+                            
+                            // Upar jao jab tak sirf ek single order card mile (jisme No: aur ₹ ho)
+                            let card = el.parentElement;
+                            for (let i = 0; i < 6; i++) {
+                                if (!card) break;
+                                let cText = card.innerText || '';
+                                if (cText.includes('Price') && cText.includes('₹')) {
+                                    let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
+                                    if (m && m[1]) {
+                                        let val = parseFloat(m[1].replace(/,/g, ''));
+                                        if (val >= minV && val <= maxV) {
+                                            el.click(); // JS click
+                                            return {
+                                                found: true,
+                                                amount: val,
+                                                box: {x: rect.left, y: rect.top, width: rect.width, height: rect.height}
+                                            };
+                                        }
+                                    }
+                                    break;
+                                }
+                                card = card.parentElement;
+                            }
+                        }
+                        return {found: false};
+                    }
+                """, {"minV": min_val, "maxV": max_val})
+
+                if target_info and target_info.get("found"):
+                    # 1. Real Touchscreen Tap on Buy Button
+                    await tap_element_center(page, target_info["box"])
+                    
+                    # Wait for bottom popup ("Pay using the following payment UPIs:")
+                    popup_opened = False
+                    for _ in range(15):
+                        await asyncio.sleep(0.3)
+                        body_txt = await page.evaluate("() => document.body.innerText")
+                        if "Pay using the following" in body_txt or "Manage UPI" in body_txt or "mobikwik" in body_txt.lower() or "amazon" in body_txt.lower():
+                            popup_opened = True
                             break
-                except Exception:
-                    pass
-
-                if matched_btn:
-                    # 1. Buy button par click
-                    await matched_btn.click()
-                    await asyncio.sleep(1.5) # Payment options popup khulne ka wait
                     
-                    # 2. Payment mode select karna (Mobikwik / Amazon)
-                    if pay_mode.lower() != "all":
-                        try:
-                            modes = await page.query_selector_all('*')
-                            for el in modes:
-                                etxt = (await el.inner_text()).strip().lower()
-                                if pay_mode.lower() in etxt and len(etxt) < 30:
-                                    await el.click()
-                                    break
-                        except Exception:
-                            pass
-                        await asyncio.sleep(1.0) # Mode select hone ka wait
+                    if not popup_opened:
+                        # Agar pehle tap me popup nahi khula, toh dubara tap karo
+                        await tap_element_center(page, target_info["box"])
+                        await asyncio.sleep(1.2)
 
-                    # 3. Tips popup par 'OK' ya confirm click karna
-                    try:
-                        all_els = await page.query_selector_all('button, .van-button, div')
-                        for el in all_els:
-                            t = (await el.inner_text()).strip()
-                            if t in ['OK', 'Confirm', '确定']:
-                                await el.click()
-                                break
-                    except Exception:
-                        pass
+                    # 2. Wallet/UPI Option Click (mobikwik / amazon)
+                    wallet_box = await page.evaluate(r"""
+                        (mode) => {
+                            let targetMode = mode.toLowerCase();
+                            let els = Array.from(document.querySelectorAll('div, span, p, li'));
+                            for (let el of els) {
+                                let txt = (el.innerText || '').trim().toLowerCase();
+                                let rect = el.getBoundingClientRect();
+                                // Bottom sheet me (y > 400) wallet item dhoondhna
+                                if (rect.top > 380 && rect.height > 15 && rect.height < 120 && rect.width > 50) {
+                                    if ((targetMode !== 'all' && txt.includes(targetMode)) || 
+                                        (targetMode === 'all' && (txt.includes('@') || txt.includes('mobikwik') || txt.includes('amazon')))) {
+                                        el.click();
+                                        return {x: rect.left, y: rect.top, width: rect.width, height: rect.height};
+                                    }
+                                }
+                            }
+                            return null;
+                        }
+                    """, pay_mode)
+
+                    if wallet_box:
+                        await tap_element_center(page, wallet_box)
                     
-                    # 4. Final payment page load hone ke liye poora 3-4 second ka wait taaki page pura khul jaye
-                    await asyncio.sleep(3.5)
+                    # 3. Wait for 'Tips' dialog ("The pre-order is successful..." -> Click 'OK')
+                    for _ in range(15):
+                        await asyncio.sleep(0.3)
+                        ok_box = await page.evaluate(r"""
+                            () => {
+                                let btns = Array.from(document.querySelectorAll('button, div, span'));
+                                for (let b of btns) {
+                                    let t = (b.innerText || '').trim();
+                                    if (t === 'OK' || t === 'Confirm' || t === '确定') {
+                                        let r = b.getBoundingClientRect();
+                                        if (r.width > 30 && r.height > 20 && r.top > 200) {
+                                            b.click();
+                                            return {x: r.left, y: r.top, width: r.width, height: r.height};
+                                        }
+                                    }
+                                }
+                                return null;
+                            }
+                        """)
+                        if ok_box:
+                            await tap_element_center(page, ok_box)
+                            break
+
+                    # 4. Wait until URL changes to buyingbymod or payment details load
+                    for _ in range(20):
+                        await asyncio.sleep(0.4)
+                        cur_url = page.url
+                        b_text = await page.evaluate("() => document.body.innerText")
+                        if "buyingbymod" in cur_url or "Payment info" in b_text or "IFSC" in b_text or "Finish payment" in b_text or "Upload Proof" in b_text:
+                            break
+
+                    await asyncio.sleep(2.5) # Wait for Account/IFSC details to populate
                     
                     shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Final Payment Page Reached & Grabbed!**\n💰 Amount: ₹{target_val}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=(
+                            f"🎉 **Order Grabbed & Payment Page Opened!**\n"
+                            f"💰 **Amount:** ₹{target_info.get('amount')}\n"
+                            f"💳 **Mode:** {pay_mode}\n"
+                            f"🔗 **URL:** `{page.url}`\n"
+                            f"⏱️ **Time Taken:** {timer_str}"
+                        ),
                         parse_mode="Markdown"
                     )
                     break
@@ -338,7 +418,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans Done:** `{scan_count} baar`\n"
-                                f"🔍 **Status:** Fast scanning orders...\n\n"
+                                f"🔍 **Status:** Scanning orders...\n\n"
                                 f"🛑 Rokne ke liye `/stop` bhejein."
                             ),
                             parse_mode="Markdown"
@@ -346,7 +426,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                await page.reload(wait_until="domcontentloaded")
+                # Refresh without breaking filter chip
+                if chip_text:
+                    await page.evaluate(r"""(chip) => {
+                        let els = Array.from(document.querySelectorAll('div, span')).filter(e => (e.innerText || '').trim() === chip);
+                        if (els.length > 0) els[0].click();
+                    }""", chip_text)
+                else:
+                    await page.reload(wait_until="domcontentloaded")
                 await asyncio.sleep(1.5)
 
             await browser.close()
