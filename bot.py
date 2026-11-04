@@ -388,7 +388,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Check if 'Notify' popup appeared ("You have a payment(...) need to pay!") -> Click 'Go pay'
+                # 0. Check Notify Popup ("need to pay!") -> Click Go pay, update message, and STOP loop immediately
                 notify_handled = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -407,22 +407,26 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """)
                 if notify_handled:
                     await asyncio.sleep(1.5)
-                    # Once 'Go pay' is clicked, send screenshot and break loop
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=f"🎉 **Order Match Ho Gaya! Payment page open ho gaya hai.** (Time: {timer_str})",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                    
                     shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=(
-                            f"🎉 **Order Grabbed via Notify & Payment Page Opened!**\n"
-                            f"💰 **Target:** ₹{target_amt}\n"
-                            f"💳 **Mode:** {pay_mode}\n"
-                            f"⏱️ **Time Taken:** {timer_str}"
-                        ),
+                        caption=f"🎉 **Order Grabbed Successfully!**\n💰 Target: ₹{target_amt}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
 
-                # 1. Check if 'Failed to pick up order' Tips popup is present -> Click 'Stay'
+                # 1. Check Tips Popup ("Failed to pick up order") -> Click Stay
                 popup_handled = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p'));
@@ -484,6 +488,17 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """, {"minV": min_val, "maxV": max_val})
 
                 if target_info and target_info.get("found"):
+                    # Update status immediately on Telegram so user knows order matched!
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=f"🎉 **Order Match Ho Gaya! (₹{target_info.get('amount')}) Payment page open ho raha hai...**",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
                     await tap_element_center(page, target_info["box"])
                     
                     popup_type = "none"
@@ -513,12 +528,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         await context.bot.send_photo(
                             chat_id=chat_id,
                             photo=shot,
-                            caption=(
-                                f"🎉 **Order Grabbed & Payment Page Opened!**\n"
-                                f"💰 **Amount:** ₹{target_info.get('amount')}\n"
-                                f"💳 **Mode:** {pay_mode}\n"
-                                f"⏱️ **Time Taken:** {timer_str}"
-                            ),
+                            caption=f"🎉 **Order Grabbed Successfully!**\n💰 Amount: ₹{target_info.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                             parse_mode="Markdown"
                         )
                         break
@@ -606,12 +616,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         await context.bot.send_photo(
                             chat_id=chat_id,
                             photo=shot,
-                            caption=(
-                                f"🎉 **Order Grabbed & Payment Page Opened!**\n"
-                                f"💰 **Amount:** ₹{target_info.get('amount')}\n"
-                                f"💳 **Mode:** {pay_mode}\n"
-                                f"⏱️ **Time Taken:** {timer_str}"
-                            ),
+                            caption=f"🎉 **Order Grabbed Successfully!**\n💰 Amount: ₹{target_info.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                             parse_mode="Markdown"
                         )
                         break
@@ -629,12 +634,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=(
-                            f"🎉 **Order Grabbed & Payment Page Opened!**\n"
-                            f"💰 **Amount:** ₹{target_info.get('amount')}\n"
-                            f"💳 **Mode:** {pay_mode}\n"
-                            f"⏱️ **Time Taken:** {timer_str}"
-                        ),
+                        caption=f"🎉 **Order Grabbed Successfully!**\n💰 Amount: ₹{target_info.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
