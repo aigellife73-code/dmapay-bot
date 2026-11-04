@@ -261,63 +261,64 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # Order match aur Buy click karne ka advanced logic
-                matched = await page.evaluate(r"""
-                    ({minV, maxV}) => {
-                        let cards = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
-                            let t = el.innerText || '';
-                            return t.includes('Price') && t.includes('Buy');
-                        });
-                        
-                        for (let card of cards) {
-                            let txt = card.innerText;
-                            let m = txt.match(/₹\s*([0-9]+(\.[0-9]+)?)/);
-                            if (m && m[1]) {
-                                let val = parseFloat(m[1]);
-                                if (val >= minV && val <= maxV) {
-                                    let btn = Array.from(card.querySelectorAll('button, div')).find(b => (b.innerText || '').trim() === 'Buy');
-                                    if (btn) {
-                                        btn.click();
-                                        return {found: true, amount: val};
-                                    }
-                                }
-                            }
-                        }
-                        return {found: false};
-                    }
-                """, {"minV": min_val, "maxV": max_val})
+                matched_btn = None
+                target_val = 0.0
+                try:
+                    cards = await page.query_selector_all('div, section, article')
+                    for card in cards:
+                        try:
+                            txt = await card.inner_text()
+                            if 'Price' in txt and 'Buy' in txt:
+                                m = re.search(r'₹\s*([0-9]+(\.[0-9]+)?)', txt)
+                                if m:
+                                    val = float(m.group(1))
+                                    if min_val <= val <= max_val:
+                                        btns = await card.query_selector_all('button, div')
+                                        for b in btns:
+                                            b_txt = (await b.inner_text()).strip()
+                                            if b_txt == 'Buy':
+                                                matched_btn = b
+                                                target_val = val
+                                                break
+                        except Exception:
+                            continue
+                        if matched_btn:
+                            break
+                except Exception:
+                    pass
 
-                if matched and matched.get("found"):
-                    await asyncio.sleep(1)
+                if matched_btn:
+                    await matched_btn.click()
+                    await asyncio.sleep(1.2)
                     
-                    # 1. Payment mode select karna (Mobikwik / Amazon)
                     if pay_mode.lower() != "all":
-                        await page.evaluate(r"""
-                            (mode) => {
-                                let radios = Array.from(document.querySelectorAll('*')).filter(el => {
-                                    return (el.innerText || '').toLowerCase().includes(mode.toLowerCase()) && el.children.length <= 2;
-                                });
-                                if (radios.length > 0) radios[0].click();
-                            }
-                        """, pay_mode)
+                        try:
+                            modes = await page.query_selector_all('*')
+                            for el in modes:
+                                etxt = (await el.inner_text()).strip().lower()
+                                if pay_mode.lower() in etxt and len(etxt) < 30:
+                                    await el.click()
+                                    break
+                        except Exception:
+                            pass
                         await asyncio.sleep(0.8)
 
-                    # 2. Tips popup par 'OK' ya confirm click karna
-                    await page.evaluate(r"""() => {
-                        let okBtns = Array.from(document.querySelectorAll('button, .van-button, div')).filter(el => {
-                            let t = (el.innerText || '').trim();
-                            return t === 'OK' || t === 'Confirm' || t === '确定';
-                        });
-                        if (okBtns.length > 0) okBtns[0].click();
-                    }""")
+                    try:
+                        all_els = await page.query_selector_all('button, .van-button, div')
+                        for el in all_els:
+                            t = (await el.inner_text()).strip()
+                            if t in ['OK', 'Confirm', '确定']:
+                                await el.click()
+                                break
+                    except Exception:
+                        pass
                     
-                    await asyncio.sleep(2) # Final payment page load hone ka wait
-                    
+                    await asyncio.sleep(2)
                     shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Order Successful & Grabbed!**[span_1](start_span)[span_1](end_span)\n💰 Amount: ₹{matched.get('amount')}[span_2](start_span)[span_2](end_span)\n💳 Mode: {pay_mode}[span_3](start_span)[span_3](end_span)\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Real Click & Order Grabbed!**\n💰 Amount: ₹{target_val}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
