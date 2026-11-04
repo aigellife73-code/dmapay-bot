@@ -149,7 +149,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         f"📱 **Account: `{phone}`**\n\n"
-        f"Ab **Target Amount** bhejein (jaise `900` ya `1000`):",
+        f"Ab **Target Amount** bhejein (jaise `1000` ya `2500`):",
         parse_mode="Markdown"
     )
 
@@ -197,7 +197,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if not text.isdigit():
-        await update.message.reply_text("❌ Sahi Amount dalein! (Jaise `1000` ya `900`):")
+        await update.message.reply_text("❌ Sahi Amount dalein! (Jaise `1000` ya `2500`):")
         return
 
     context.user_data['target_amount'] = text
@@ -225,10 +225,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
     
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Fully Active!**\n"
-        f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
+        f"🚀 **Auto-Buy Fully Active ('All' Tab + Auto-Scroll)**\n"
+        f"📱 `{phone}` | 💰 Target: ₹{target_amt} | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Selecting 'All' tab & scanning...\n\n"
+        f"🔍 **Status:** Selecting 'All' & scrolling to scan all orders...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -256,7 +256,6 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 async def select_all_tab(page):
-    """Clicks the 'All' tab to view all available orders without min-max filtering"""
     try:
         clicked = await page.evaluate(r"""
             () => {
@@ -374,7 +373,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Select 'All' tab initially
             await select_all_tab(page)
 
             try:
@@ -382,11 +380,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
-                    caption=f"✅ **'All' Tab Selected!**\nScanning for exact amount: ₹{int(target_val)}...",
+                    caption=f"✅ **'All' Tab & Auto-Scroll Active!**\nScanning exact amount: ₹{int(target_val)}...",
                     parse_mode="Markdown"
                 )
             except Exception:
                 pass
+
+            scroll_direction = 1 # 1 for down, -1 for up
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -394,7 +394,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Check Bank Details Page (#/buyingbymod)
                 cur_url = page.url
                 b_text = await page.evaluate("() => document.body.innerText")
                 if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
@@ -413,7 +412,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # 1. Check Notify Popup ("need to pay!" -> Go pay)
                 notify_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -453,7 +451,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # 2. Handle 'Please slow down' / 'Failed to pick up order' -> Click 'Stay'
                 stay_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -477,7 +474,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(1.0)
                     continue
 
-                # 3. Scan & Scroll for Exact Amount in 'All' Tab
+                # Scan all visible orders on screen (including hidden/scrolled ones)
                 scan_result = await page.evaluate(r"""
                     (targetV) => {
                         let visiblePrices = [];
@@ -490,7 +487,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             if (hasSameChild) continue;
                             
                             let rect = el.getBoundingClientRect();
-                            if (rect.top < 150 || rect.top > 760 || rect.left < 200 || rect.width < 25) continue;
+                            if (rect.top < 120 || rect.top > 800 || rect.width < 25) continue;
                             
                             let card = el.parentElement;
                             for (let i = 0; i < 7; i++) {
@@ -539,7 +536,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # STEP 1 SCREENSHOT: Buy Clicked
                     await asyncio.sleep(0.5)
                     try:
                         shot_buy = await page.screenshot()
@@ -552,13 +548,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # Select Wallet (Mobikwik / Amazon)
                     await click_wallet_option(page, pay_mode)
                     
-                    # Exact 3 seconds wait for bank details to load
+                    # 3 seconds wait for bank details to load securely
                     await asyncio.sleep(3.0)
 
-                    # STEP 2 SCREENSHOT: Wallet Selected
                     try:
                         shot_wallet = await page.screenshot()
                         await context.bot.send_photo(
@@ -687,7 +681,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active ('All' Tab)**\n"
+                                f"🚀 **Auto-Buy Active ('All' Tab + Auto-Scroll)**\n"
                                 f"📱 `{phone}` | 💰 Target: ₹{int(target_val)} | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans:** `{scan_count}` | **Retries:** `{retry_count}`\n"
@@ -699,15 +693,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Scroll down a bit to scan lower orders, then re-select 'All' or scroll back up
-                await page.evaluate("window.scrollBy(0, 300)")
-                await asyncio.sleep(1.0)
+                # Auto-Scroll down and up smoothly to check hidden orders
+                await page.evaluate(f"window.scrollBy(0, {250 * scroll_direction})")
                 
-                # Periodically re-select 'All' to refresh list
-                if scan_count % 5 == 0:
-                    await page.evaluate("window.scrollTo(0, 0)")
-                    await select_all_tab(page)
-                    await asyncio.sleep(0.8)
+                # Check scroll position limits to switch direction
+                scroll_pos = await page.evaluate("window.pageYOffset")
+                max_scroll = await page.evaluate("document.body.scrollHeight - window.innerHeight")
+                if scroll_pos >= max_scroll - 50:
+                    scroll_direction = -1 # scroll up
+                elif scroll_pos <= 10:
+                    scroll_direction = 1 # scroll down
+
+                await asyncio.sleep(1.0)
 
             await browser.close()
     except Exception as e:
