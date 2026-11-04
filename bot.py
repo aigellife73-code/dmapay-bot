@@ -228,7 +228,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Setting smart price range filter...\n\n"
+        f"🔍 **Status:** Setting Min & Max filter...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -271,7 +271,7 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
         """)
         if arrow_box:
             await tap_point(page, arrow_box["x"], arrow_box["y"])
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.3)
 
         inputs = await page.query_selector_all("input")
         if len(inputs) >= 2:
@@ -279,10 +279,9 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
             await inputs[0].fill(str(int(min_val)))
             await inputs[1].click()
             await inputs[1].fill(str(int(max_val)))
-            await asyncio.sleep(0.3)
-            # Click 🔍 Search icon button reliably
+            await asyncio.sleep(0.2)
+            # Fast tap on 🔍 Search icon button (every 0.3s)
             await tap_point(page, 355, 170)
-            await asyncio.sleep(0.8)
     except Exception:
         pass
 
@@ -374,11 +373,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
     else:
         try:
             val = float(target_amt.replace('₹','').strip())
-            # Smart Range for single amounts (e.g. 500 -> 500 to 650, 1000 -> 1000 to 1150)
             min_val = val
-            max_val = val + 150
+            max_val = val
         except:
-            min_val, max_val = 1000.0, 1150.0
+            min_val, max_val = 1000.0, 1000.0
 
     try:
         async with async_playwright() as p:
@@ -402,11 +400,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Set smart Min and Max range and click 🔍 search
+            # Set exact Min and Max range and click 🔍 search
             await set_custom_price_filter(page, min_val, max_val)
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.0)
 
-            # Send Startup Screenshot immediately so user sees the filter applied
+            # Send Startup Screenshot
             try:
                 init_shot = await page.screenshot()
                 await context.bot.send_photo(
@@ -504,7 +502,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 if stay_box:
                     await tap_element_center(page, stay_box)
                     retry_count += 1
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.4)
                     continue
 
                 # 3. Sequential Single-Order Scanner
@@ -532,7 +530,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                         let val = parseFloat(m[1].replace(/,/g, ''));
                                         visiblePrices.push(val);
                                         if (val >= minV && val <= maxV) {
-                                            el.click();
+                                            el.click(); // Click one order at a time sequentially
                                             return {
                                                 found: true,
                                                 amount: val,
@@ -598,13 +596,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # Handle 'OK' or 'Stay'
+                    # Handle 'OK', 'Stay' or 'Please slow down'
                     step_result = "unknown"
-                    for _ in range(12):
+                    for _ in range(15):
                         await asyncio.sleep(0.2)
                         body_txt = await page.evaluate("() => document.body.innerText")
                         
-                        if "Failed to pick up order" in body_txt or "Please slow down" in body_txt:
+                        if "Failed to pick up order" in body_txt or "Please slow down" in body_txt or "Tips" in body_txt:
                             s_box = await page.evaluate(r"""
                                 () => {
                                     let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -655,7 +653,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         retry_count += 1
                         await asyncio.sleep(0.8)
                         await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(0.6)
+                        await asyncio.sleep(0.5)
                         continue
 
                     # Wait for Final Bank Details
@@ -729,9 +727,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Quick 🔍 search refresh click
+                # Ultra-fast 0.3s refresh click on 🔍 search icon
                 await set_custom_price_filter(page, min_val, max_val)
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(0.3)
 
             await browser.close()
     except Exception as e:
