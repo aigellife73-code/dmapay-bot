@@ -240,93 +240,6 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     running_tasks[chat_id] = {"active": True}
     asyncio.create_task(run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, status_msg.message_id, context))
 
-async def tap_point(page, x, y):
-    try:
-        await page.touchscreen.tap(x, y)
-    except Exception:
-        pass
-    try:
-        await page.mouse.click(x, y)
-    except Exception:
-        pass
-
-async def tap_element_center(page, box):
-    cx = box["x"] + box["width"] / 2
-    cy = box["y"] + box["height"] / 2
-    await tap_point(page, cx, cy)
-
-async def click_wallet_option(page, pay_mode: str):
-    mode = pay_mode.lower().strip()
-    coords = await page.evaluate(r"""
-        (targetMode) => {
-            let nodes = Array.from(document.querySelectorAll('div, span, p, li, label'));
-            let targetEl = null;
-            
-            for (let el of nodes) {
-                let t = (el.innerText || '').trim().toLowerCase();
-                if (!t || t.startsWith('wallets:') || t.includes('pay using') || t.includes('manage upi')) continue;
-                
-                let r = el.getBoundingClientRect();
-                if (r.top < 260 || r.top > 750 || r.height > 80 || r.height < 12) continue;
-                
-                if (targetMode === 'mobikwik' && (t.includes('@mbk') || t === 'mobikwik')) {
-                    targetEl = el;
-                    if (t.includes('@mbk')) break;
-                } else if (targetMode === 'amazon' && (t.includes('@yapl') || t === 'amazon')) {
-                    targetEl = el;
-                    if (t.includes('@yapl')) break;
-                } else if (targetMode === 'all' && (t.includes('@') || t === 'mobikwik' || t === 'amazon')) {
-                    targetEl = el;
-                    break;
-                }
-            }
-            
-            if (!targetEl) return null;
-            
-            let row = targetEl;
-            for (let i = 0; i < 4; i++) {
-                if (!row.parentElement) break;
-                let pr = row.parentElement.getBoundingClientRect();
-                if (pr.width >= 260 && pr.height <= 90) {
-                    row = row.parentElement;
-                    break;
-                }
-                row = row.parentElement;
-            }
-            
-            row.click();
-            targetEl.click();
-            
-            let children = row.querySelectorAll('*');
-            let radioRect = null;
-            for (let c of children) {
-                let cr = c.getBoundingClientRect();
-                if (cr.left > 300 && cr.width >= 10 && cr.width <= 45) {
-                    c.click();
-                    radioRect = {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
-                }
-            }
-            
-            let rr = row.getBoundingClientRect();
-            let cy = rr.top + rr.height / 2;
-            return {
-                textX: rr.left + 110,
-                centerX: rr.left + rr.width / 2,
-                radioX: radioRect ? radioRect.x : (rr.right - 25),
-                y: radioRect ? radioRect.y : cy
-            };
-        }
-    """, mode)
-
-    if coords:
-        await tap_point(page, coords["radioX"], coords["y"])
-        await asyncio.sleep(0.15)
-        await tap_point(page, coords["textX"], coords["y"])
-        await asyncio.sleep(0.15)
-        await tap_point(page, coords["centerX"], coords["y"])
-        return True
-    return False
-
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
     start_time = time.time()
     scan_count = 0
@@ -373,251 +286,141 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Check Notify Popup ("need to pay!") -> Click Go pay
-                notify_handled = await page.evaluate(r"""
+                # 1. Handle Popups (Notify / Tips / Stay) automatically via simple evaluate JS
+                popup_handled = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
                         for (let d of divs) {
                             let t = (d.innerText || '').trim();
+                            // If notify 'Go pay' is present
                             if (t.includes('need to pay!') || t === 'Notify') {
-                                let goPayBtn = divs.find(b => (b.innerText || '').trim() === 'Go pay');
-                                if (goPayBtn) {
-                                    goPayBtn.click();
-                                    return true;
-                                }
+                                let goPay = divs.find(b => (b.innerText || '').trim() === 'Go pay');
+                                if (goPay) { goPay.click(); return 'notify'; }
                             }
-                        }
-                        return false;
-                    }
-                """)
-                if notify_handled:
-                    await asyncio.sleep(1.5)
-                    try:
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=f"🎉 **Order Match Ho Gaya! Payment page open ho gaya hai.** (Time: {timer_str})",
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        pass
-                    
-                    shot = await page.screenshot(full_page=True)
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=shot,
-                        caption=f"🎉 **Order Grabbed Successfully!**\n💰 Target: ₹{target_amt}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
-                        parse_mode="Markdown"
-                    )
-                    break
-
-                # 1. Check Tips Popup ("Failed to pick up order") -> Click Stay
-                popup_handled = await page.evaluate(r"""
-                    () => {
-                        let divs = Array.from(document.querySelectorAll('div, span, p'));
-                        for (let d of divs) {
-                            let t = (d.innerText || '').trim();
+                            // If failed tips 'Stay' is present
                             if (t.includes('Failed to pick up order') || t === 'Tips') {
-                                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                if (stayBtn) {
-                                    stayBtn.click();
-                                    return true;
-                                }
+                                let stay = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                                if (stay) { stay.click(); return 'stay'; }
+                            }
+                            // If confirmation OK is present
+                            if (t === 'OK' || t === 'Confirm') {
+                                let r = d.getBoundingClientRect();
+                                if (r.width > 20 && r.top > 200) { d.click(); return 'ok'; }
                             }
                         }
-                        return false;
+                        return null;
                     }
                 """)
 
-                if popup_handled:
-                    await asyncio.sleep(0.8)
+                if popup_handled == 'notify':
+                    await asyncio.sleep(2)
+                    shot = await page.screenshot(full_page=True)
+                    await context.bot.send_photo(chat_id=chat_id, photo=shot, caption=f"🎉 **Order Grabbed Successfully via Notify!**\n⏱️ Time: {timer_str}", parse_mode="Markdown")
+                    break
+                elif popup_handled == 'stay':
+                    await asyncio.sleep(0.5)
                     continue
 
-                # 2. Smart DOM Scanner: Find any card with price in range and click its Buy button
-                target_info = await page.evaluate(r"""
-                    ({minV, maxV}) => {
-                        let cards = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
-                            let t = el.innerText || '';
-                            return t.includes('Price') && t.includes('Buy');
+                # 2. Super Fast & Direct DOM Click on Matched Buy Button
+                clicked_order = await page.evaluate(r"""
+                    ({minV, maxV, targetMode}) => {
+                        let buyBtns = Array.from(document.querySelectorAll('button, div, span, a')).filter(el => {
+                            return (el.innerText || '').trim() === 'Buy' && el.children.length === 0;
                         });
                         
-                        for (let card of cards) {
-                            let txt = card.innerText;
-                            let m = txt.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
-                            if (m && m[1]) {
-                                let val = parseFloat(m[1].replace(/,/g, ''));
-                                if (val >= minV && val <= maxV) {
-                                    let btn = Array.from(card.querySelectorAll('button, div, span')).find(b => (b.innerText || '').trim() === 'Buy' && b.children.length === 0);
-                                    if (btn) {
-                                        let rect = btn.getBoundingClientRect();
-                                        if (rect.top > 150 && rect.top < 780 && rect.width > 20) {
+                        for (let btn of buyBtns) {
+                            let rect = btn.getBoundingClientRect();
+                            if (rect.top < 150 || rect.top > 780 || rect.left < 200) continue;
+                            
+                            // Find parent order card
+                            let card = btn.parentElement;
+                            for (let i = 0; i < 6; i++) {
+                                if (!card) break;
+                                let cText = card.innerText || '';
+                                if (cText.includes('Price') && cText.includes('₹')) {
+                                    let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
+                                    if (m && m[1]) {
+                                        let val = parseFloat(m[1].replace(/,/g, ''));
+                                        if (val >= minV && val <= maxV) {
+                                            // Click Buy button directly using JS
                                             btn.click();
-                                            return {
-                                                found: true,
-                                                amount: val,
-                                                box: {x: rect.left, y: rect.top, width: rect.width, height: rect.height}
-                                            };
+                                            
+                                            // Also click inside card to trigger events
+                                            card.click();
+                                            return {found: true, amount: val};
                                         }
                                     }
+                                    break;
                                 }
+                                card = card.parentElement;
                             }
                         }
                         return {found: false};
                     }
-                """, {"minV": min_val, "maxV": max_val})
+                """, {"minV": min_val, "maxV": max_val, "targetMode": pay_mode})
 
-                if target_info and target_info.get("found"):
-                    running_tasks[chat_id]["active"] = False # Stop loop immediately
+                if clicked_order and clicked_order.get("found"):
+                    running_tasks[chat_id]["active"] = False
+                    amt = clicked_order.get("amount")
                     
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
-                            text=f"🎯 **Order Match Ho Gaya! (₹{target_info.get('amount')}) Click kar diya gaya hai. Processing...**",
+                            text=f"🎯 **Order Match (₹{amt})! Clicked successfully. Selecting payment...**",
                             parse_mode="Markdown"
                         )
                     except Exception:
                         pass
 
-                    await tap_element_center(page, target_info["box"])
-                    
-                    popup_type = "none"
-                    for _ in range(15):
-                        await asyncio.sleep(0.3)
-                        body_txt = await page.evaluate("() => document.body.innerText")
-                        if "need to pay!" in body_txt or "Go pay" in body_txt:
-                            popup_type = "notify"
-                            break
-                        if "Failed to pick up order" in body_txt:
-                            popup_type = "failed"
-                            break
-                        if "Pay using the following" in body_txt or "Manage UPI" in body_txt:
-                            popup_type = "success"
-                            break
-                    
-                    if popup_type == "notify":
-                        await page.evaluate(r"""
-                            () => {
-                                let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-                                let goPayBtn = divs.find(b => (b.innerText || '').trim() === 'Go pay');
-                                if (goPayBtn) goPayBtn.click();
-                            }
-                        """)
-                        await asyncio.sleep(2)
-                        shot = await page.screenshot(full_page=True)
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=shot,
-                            caption=f"🎉 **Order Grabbed Successfully!**\n💰 Amount: ₹{target_info.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
-                            parse_mode="Markdown"
-                        )
-                        break
+                    await asyncio.sleep(1.0) # Wait for wallet popup sheet
 
-                    if popup_type == "failed":
-                        await page.evaluate(r"""
-                            () => {
-                                let divs = Array.from(document.querySelectorAll('div, span, p'));
-                                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                if (stayBtn) stayBtn.click();
-                            }
-                        """)
-                        await asyncio.sleep(0.5)
-                        # Restart loop if failed
-                        running_tasks[chat_id]["active"] = True
-                        continue
-
-                    await asyncio.sleep(0.6)
-
-                    tips_done = False
-                    for _ in range(4):
-                        await click_wallet_option(page, pay_mode)
-                        
-                        for _ in range(8):
-                            await asyncio.sleep(0.3)
-                            
-                            body_txt = await page.evaluate("() => document.body.innerText")
-                            if "need to pay!" in body_txt or "Go pay" in body_txt:
-                                await page.evaluate(r"""
-                                    () => {
-                                        let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-                                        let goPayBtn = divs.find(b => (b.innerText || '').trim() === 'Go pay');
-                                        if (goPayBtn) goPayBtn.click();
+                    # 3. Select Wallet inside bottom sheet popup
+                    await page.evaluate(r"""
+                        (mode) => {
+                            let m = mode.toLowerCase();
+                            let items = Array.from(document.querySelectorAll('div, span, p, li'));
+                            for (let it of items) {
+                                let txt = (it.innerText || '').trim().toLowerCase();
+                                let r = it.getBoundingClientRect();
+                                if (r.top > 250 && r.top < 780 && r.height < 70) {
+                                    if ((m === 'mobikwik' && (txt.includes('@mbk') || txt === 'mobikwik')) ||
+                                        (m === 'amazon' && (txt.includes('@yapl') || txt === 'amazon')) ||
+                                        (m === 'all' && txt.includes('@'))) {
+                                        it.click();
+                                        // Click parent row as well
+                                        let p = it.parentElement;
+                                        if (p) p.click();
+                                        break;
                                     }
-                                """)
-                                tips_done = "notify_done"
-                                break
-
-                            if "Failed to pick up order" in body_txt:
-                                await page.evaluate(r"""
-                                    () => {
-                                        let divs = Array.from(document.querySelectorAll('div, span, p'));
-                                        let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                        if (stayBtn) stayBtn.click();
-                                    }
-                                """)
-                                tips_done = "failed_retry"
-                                break
-
-                            ok_box = await page.evaluate(r"""
-                                () => {
-                                    let btns = Array.from(document.querySelectorAll('button, div, span'));
-                                    for (let b of btns) {
-                                        let t = (b.innerText || '').trim();
-                                        if (t === 'OK' || t === 'Confirm' || t === '确定') {
-                                            let r = b.getBoundingClientRect();
-                                            if (r.width > 25 && r.height > 18 && r.top > 200) {
-                                                b.click();
-                                                return {x: r.left, y: r.top, width: r.width, height: r.height};
-                                            }
-                                        }
-                                    }
-                                    return null;
                                 }
-                            """)
-                            if ok_box:
-                                await tap_element_center(page, ok_box)
-                                tips_done = True
-                                break
-                            
-                            if "buyingbymod" in page.url:
-                                tips_done = True
-                                break
-                        
-                        if tips_done == "failed_retry":
-                            break
-                        if tips_done:
-                            break
+                            }
+                        }
+                    """, pay_mode)
 
-                    if tips_done == "failed_retry":
-                        await asyncio.sleep(0.5)
-                        running_tasks[chat_id]["active"] = True
-                        continue
+                    await asyncio.sleep(0.8)
 
-                    if tips_done == "notify_done":
-                        await asyncio.sleep(2)
-                        shot = await page.screenshot(full_page=True)
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=shot,
-                            caption=f"🎉 **Order Grabbed Successfully!**\n💰 Amount: ₹{target_info.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
-                            parse_mode="Markdown"
-                        )
-                        break
+                    # 4. Handle Tips dialog 'OK' if it pops up
+                    await page.evaluate(r"""
+                        () => {
+                            let btns = Array.from(document.querySelectorAll('button, div, span'));
+                            for (let b of btns) {
+                                let t = (b.innerText || '').trim();
+                                if (t === 'OK' || t === 'Confirm' || t === '确定') {
+                                    let r = b.getBoundingClientRect();
+                                    if (r.width > 20 && r.top > 200) { b.click(); break; }
+                                }
+                            }
+                        }
+                    """)
 
-                    for _ in range(25):
-                        await asyncio.sleep(0.4)
-                        cur_url = page.url
-                        b_text = await page.evaluate("() => document.body.innerText")
-                        if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
-                            break
-
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(2.5)
                     
                     shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Order Grabbed Successfully!**\n💰 Amount: ₹{target_info.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Order Grabbed & Payment Page Opened!**\n💰 Amount: ₹{amt}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
