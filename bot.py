@@ -201,17 +201,105 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     running_tasks[chat_id] = {"active": True}
     asyncio.create_task(run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, status_msg.message_id, context))
 
+async def tap_point(page, x, y):
+    try:
+        await page.touchscreen.tap(x, y)
+    except Exception:
+        pass
+    try:
+        await page.mouse.click(x, y)
+    except Exception:
+        pass
+
 async def tap_element_center(page, box):
     cx = box["x"] + box["width"] / 2
     cy = box["y"] + box["height"] / 2
-    try:
-        await page.touchscreen.tap(cx, cy)
-    except Exception:
-        pass
-    try:
-        await page.mouse.click(cx, cy)
-    except Exception:
-        pass
+    await tap_point(page, cx, cy)
+
+async def select_wallet_in_popup(page, pay_mode: str):
+    mode = pay_mode.lower().strip()
+    # Find exact wallet row inside the bottom popup (ignoring "Wallets: Mobikwik..." header)
+    wallet_info = await page.evaluate(r"""
+        (targetMode) => {
+            let all = Array.from(document.querySelectorAll('div, li, label, span, p'));
+            let candidates = [];
+            
+            for (let el of all) {
+                let txt = (el.innerText || '').trim();
+                let low = txt.toLowerCase();
+                if (!txt || low.startsWith('wallets:') || low.includes('pay using the following') || low.includes('manage upi')) {
+                    continue;
+                }
+                
+                let rect = el.getBoundingClientRect();
+                // Popup rows appear in the middle/bottom area
+                if (rect.top < 250 || rect.height < 14 || rect.height > 95 || rect.width < 40) continue;
+                
+                let match = false;
+                if (targetMode === 'mobikwik' && (low === 'mobikwik' || low.includes('@mbk') || (low.includes('mobikwik') && !low.includes('amazon')))) {
+                    match = true;
+                } else if (targetMode === 'amazon' && (low === 'amazon' || low.includes('@yapl') || (low.includes('amazon') && !low.includes('mobikwik')))) {
+                    match = true;
+                } else if (targetMode === 'all' && (low.includes('@') || low === 'mobikwik' || low === 'amazon')) {
+                    match = true;
+                }
+                
+                if (match) {
+                    candidates.push({
+                        el: el,
+                        area: rect.width * rect.height,
+                        hasAt: low.includes('@'),
+                        rect: {x: rect.left, y: rect.top, width: rect.width, height: rect.height}
+                    });
+                }
+            }
+            
+            if (candidates.length === 0) return null;
+            
+            // Prefer container that has both wallet name and @upi (or tightest row)
+            candidates.sort((a, b) => {
+                if (a.hasAt !== b.hasAt) return a.hasAt ? -1 : 1;
+                return a.area - b.area;
+            });
+            
+            let best = candidates[0];
+            best.el.click();
+            
+            // Also click parent row & any radio/icon inside parent row
+            let row = best.el.parentElement;
+            for (let i = 0; i < 3; i++) {
+                if (!row) break;
+                row.click();
+                let radios = row.querySelectorAll('input, .van-radio, .van-icon, i, svg, span');
+                radios.forEach(r => { try { r.click(); } catch(e){} });
+                let rRect = row.getBoundingClientRect();
+                if (rRect.width > 200 && rRect.height < 90) {
+                    return {
+                        center: {x: rRect.left + rRect.width / 2, y: rRect.top + rRect.height / 2},
+                        radio: {x: rRect.right - 28, y: rRect.top + rRect.height / 2},
+                        left: {x: rRect.left + 80, y: rRect.top + rRect.height / 2}
+                    };
+                }
+                row = row.parentElement;
+            }
+            
+            return {
+                center: {x: best.rect.x + best.rect.width / 2, y: best.rect.y + best.rect.height / 2},
+                radio: {x: 345, y: best.rect.y + best.rect.height / 2},
+                left: {x: 120, y: best.rect.y + best.rect.height / 2}
+            };
+        }
+    """, mode)
+
+    if wallet_info:
+        # Tap on text, center, and right-side radio circle
+        await tap_point(page, wallet_info["left"]["x"], wallet_info["left"]["y"])
+        await asyncio.sleep(0.15)
+        await tap_point(page, wallet_info["center"]["x"], wallet_info["center"]["y"])
+        await asyncio.sleep(0.15)
+        await tap_point(page, wallet_info["radio"]["x"], wallet_info["radio"]["y"])
+        return True
+    return False
 
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
     start_time = time.time()
@@ -253,7 +341,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Filter chip select karna
             chip_text = None
             if max_val <= 999:
                 chip_text = "0~999"
@@ -275,8 +362,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # Sirf ASLI Order Card ke Buy button ka exact coordinate nikalna
-                # Header (y < 180) aur Bottom Nav (y > 760) ke 'Buy' ko ignore karega
                 target_info = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let allEls = Array.from(document.querySelectorAll('button, div, span, a'));
@@ -288,10 +373,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             if (directText.trim() !== 'Buy') continue;
                             
                             let rect = el.getBoundingClientRect();
-                            // Order list beech me hoti hai (y: 180 se 750) aur Buy button right side (x > 250)
                             if (rect.top < 180 || rect.top > 750 || rect.left < 240 || rect.width < 30) continue;
                             
-                            // Upar jao jab tak sirf ek single order card mile (jisme No: aur ₹ ho)
                             let card = el.parentElement;
                             for (let i = 0; i < 6; i++) {
                                 if (!card) break;
@@ -301,7 +384,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                     if (m && m[1]) {
                                         let val = parseFloat(m[1].replace(/,/g, ''));
                                         if (val >= minV && val <= maxV) {
-                                            el.click(); // JS click
+                                            el.click();
                                             return {
                                                 found: true,
                                                 amount: val,
@@ -319,79 +402,80 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """, {"minV": min_val, "maxV": max_val})
 
                 if target_info and target_info.get("found"):
-                    # 1. Real Touchscreen Tap on Buy Button
+                    # 1. Tap Buy Button
                     await tap_element_center(page, target_info["box"])
                     
-                    # Wait for bottom popup ("Pay using the following payment UPIs:")
-                    popup_opened = False
+                    # Wait for bottom popup to appear & finish slide animation
                     for _ in range(15):
                         await asyncio.sleep(0.3)
                         body_txt = await page.evaluate("() => document.body.innerText")
-                        if "Pay using the following" in body_txt or "Manage UPI" in body_txt or "mobikwik" in body_txt.lower() or "amazon" in body_txt.lower():
-                            popup_opened = True
+                        if "Pay using the following" in body_txt or "Manage UPI" in body_txt:
                             break
                     
-                    if not popup_opened:
-                        # Agar pehle tap me popup nahi khula, toh dubara tap karo
-                        await tap_element_center(page, target_info["box"])
-                        await asyncio.sleep(1.2)
+                    await asyncio.sleep(0.6) # Wait for slide-up animation to settle
 
-                    # 2. Wallet/UPI Option Click (mobikwik / amazon)
-                    wallet_box = await page.evaluate(r"""
-                        (mode) => {
-                            let targetMode = mode.toLowerCase();
-                            let els = Array.from(document.querySelectorAll('div, span, p, li'));
-                            for (let el of els) {
-                                let txt = (el.innerText || '').trim().toLowerCase();
-                                let rect = el.getBoundingClientRect();
-                                // Bottom sheet me (y > 400) wallet item dhoondhna
-                                if (rect.top > 380 && rect.height > 15 && rect.height < 120 && rect.width > 50) {
-                                    if ((targetMode !== 'all' && txt.includes(targetMode)) || 
-                                        (targetMode === 'all' && (txt.includes('@') || txt.includes('mobikwik') || txt.includes('amazon')))) {
-                                        el.click();
-                                        return {x: rect.left, y: rect.top, width: rect.width, height: rect.height};
-                                    }
-                                }
-                            }
-                            return null;
-                        }
-                    """, pay_mode)
+                    # 2. Select Mobikwik / Amazon & wait for 'Tips' dialog ("OK")
+                    tips_clicked = False
+                    for attempt in range(4):
+                        await select_wallet_in_popup(page, pay_mode)
+                        
+                        # Also try Playwright native text locator click as backup
+                        try:
+                            if pay_mode.lower() == "mobikwik":
+                                loc = page.get_by_text("@mbk", exact=False).first
+                                if await loc.count() > 0:
+                                    await loc.click(force=True)
+                                else:
+                                    loc2 = page.get_by_text("mobikwik", exact=True).first
+                                    if await loc2.count() > 0:
+                                        await loc2.click(force=True)
+                            elif pay_mode.lower() == "amazon":
+                                loc = page.get_by_text("@yapl", exact=False).first
+                                if await loc.count() > 0:
+                                    await loc.click(force=True)
+                        except Exception:
+                            pass
 
-                    if wallet_box:
-                        await tap_element_center(page, wallet_box)
-                    
-                    # 3. Wait for 'Tips' dialog ("The pre-order is successful..." -> Click 'OK')
-                    for _ in range(15):
-                        await asyncio.sleep(0.3)
-                        ok_box = await page.evaluate(r"""
-                            () => {
-                                let btns = Array.from(document.querySelectorAll('button, div, span'));
-                                for (let b of btns) {
-                                    let t = (b.innerText || '').trim();
-                                    if (t === 'OK' || t === 'Confirm' || t === '确定') {
-                                        let r = b.getBoundingClientRect();
-                                        if (r.width > 30 && r.height > 20 && r.top > 200) {
-                                            b.click();
-                                            return {x: r.left, y: r.top, width: r.width, height: r.height};
+                        # Check for 'Tips' popup -> click 'OK'
+                        for _ in range(8):
+                            await asyncio.sleep(0.3)
+                            ok_box = await page.evaluate(r"""
+                                () => {
+                                    let btns = Array.from(document.querySelectorAll('button, div, span'));
+                                    for (let b of btns) {
+                                        let t = (b.innerText || '').trim();
+                                        if (t === 'OK' || t === 'Confirm' || t === '确定') {
+                                            let r = b.getBoundingClientRect();
+                                            if (r.width > 25 && r.height > 18 && r.top > 200) {
+                                                b.click();
+                                                return {x: r.left, y: r.top, width: r.width, height: r.height};
+                                            }
                                         }
                                     }
+                                    return null;
                                 }
-                                return null;
-                            }
-                        """)
-                        if ok_box:
-                            await tap_element_center(page, ok_box)
+                            """)
+                            if ok_box:
+                                await tap_element_center(page, ok_box)
+                                tips_clicked = True
+                                break
+                            
+                            if "buyingbymod" in page.url:
+                                tips_clicked = True
+                                break
+                        
+                        if tips_clicked:
                             break
 
-                    # 4. Wait until URL changes to buyingbymod or payment details load
-                    for _ in range(20):
+                    # 3. Wait until URL changes to #/buyingbymod and bank details load
+                    for _ in range(25):
                         await asyncio.sleep(0.4)
                         cur_url = page.url
                         b_text = await page.evaluate("() => document.body.innerText")
-                        if "buyingbymod" in cur_url or "Payment info" in b_text or "IFSC" in b_text or "Finish payment" in b_text or "Upload Proof" in b_text:
+                        if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
                             break
 
-                    await asyncio.sleep(2.5) # Wait for Account/IFSC details to populate
+                    await asyncio.sleep(1.5)
                     
                     shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
@@ -426,7 +510,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Refresh without breaking filter chip
                 if chip_text:
                     await page.evaluate(r"""(chip) => {
                         let els = Array.from(document.querySelectorAll('div, span')).filter(e => (e.innerText || '').trim() === chip);
