@@ -197,7 +197,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
-        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `1000` ya `600-900`):")
+        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `1000` ya `500-900`):")
         return
 
     context.user_data['target_amount'] = text.replace(" ", "")
@@ -228,7 +228,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Browser starting & setting custom range...\n\n"
+        f"🔍 **Status:** Browser starting & setting Min-Max filter...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -257,6 +257,7 @@ async def tap_element_center(page, box):
 
 async def set_custom_price_filter(page, min_val: float, max_val: float):
     try:
+        # Open filter drawer if collapsed
         arrow_box = await page.evaluate(r"""
             () => {
                 let els = Array.from(document.querySelectorAll('div, span, i, svg'));
@@ -279,8 +280,9 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
             await inputs[1].click()
             await inputs[1].fill(str(int(max_val)))
             await asyncio.sleep(0.2)
+            # Click 🔍 Search icon button rapidly and reliably
             await tap_point(page, 355, 170)
-            await asyncio.sleep(0.8)
+            await asyncio.sleep(0.6)
     except Exception:
         pass
 
@@ -368,12 +370,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             min_val = float(parts[0].strip())
             max_val = float(parts[1].strip())
         except:
-            min_val, max_val = 600.0, 900.0
+            min_val, max_val = 500.0, 900.0
     else:
         try:
-            min_val = max_val = float(target_amt.replace('₹','').strip())
+            val = float(target_amt.replace('₹','').strip())
+            min_val = max_val = val
         except:
-            min_val, max_val = 1000.0
+            min_val, max_val = 1000.0, 1000.0
 
     try:
         async with async_playwright() as p:
@@ -397,8 +400,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
+            # Set exact Min and Max range and click 🔍 search
             await set_custom_price_filter(page, min_val, max_val)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(1.2)
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -486,10 +490,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 if stay_box:
                     await tap_element_center(page, stay_box)
                     retry_count += 1
-                    await asyncio.sleep(0.4)
+                    await asyncio.sleep(0.5)
                     continue
 
-                # 3. Universal Card Scanner & Buy Click
+                # 3. Sequential Single-Order Scanner (Pehle ek order par click karega)
                 scan_result = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let visiblePrices = [];
@@ -514,7 +518,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                         let val = parseFloat(m[1].replace(/,/g, ''));
                                         visiblePrices.push(val);
                                         if (val >= minV && val <= maxV) {
-                                            el.click();
+                                            el.click(); // Click ONLY ONE buy button at a time
                                             return {
                                                 found: true,
                                                 amount: val,
@@ -534,14 +538,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                 visible_prices = scan_result.get("prices", []) if scan_result else []
 
-                if not scan_result.get("found"):
-                    if any(p < min_val or p > max_val for p in visible_prices):
-                        await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(0.5)
-
                 if scan_result and scan_result.get("found"):
                     amt = scan_result.get("amount")
-                    await tap_element_center(page, scan_result["box"])
                     
                     try:
                         await context.bot.edit_message_text(
@@ -557,7 +555,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # STEP 1 SCREENSHOT: Buy Click hone ke turant baad
+                    # STEP 1 SCREENSHOT: Buy click hote hi
                     await asyncio.sleep(0.4)
                     try:
                         shot_buy = await page.screenshot()
@@ -574,7 +572,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await click_wallet_option(page, pay_mode)
                     await asyncio.sleep(0.5)
 
-                    # STEP 2 SCREENSHOT: Wallet select hone ke baad
+                    # STEP 2 SCREENSHOT: Wallet select hote hi
                     try:
                         shot_wallet = await page.screenshot()
                         await context.bot.send_photo(
@@ -641,12 +639,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if step_result == "failed_retry":
                         retry_count += 1
-                        await asyncio.sleep(0.4)
+                        await asyncio.sleep(0.8) # Slow & steady delay before trying next order
                         await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.6)
                         continue
 
-                    # Wait for Bank Details
+                    # Wait for Final Bank Details Page
                     bank_loaded = False
                     for _ in range(25):
                         await asyncio.sleep(0.3)
@@ -677,7 +675,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if not bank_loaded:
                         retry_count += 1
-                        await asyncio.sleep(0.4)
+                        await asyncio.sleep(0.5)
                         continue
 
                     await asyncio.sleep(1.0)
@@ -717,8 +715,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
+                # Fast 🔍 search refresh click
                 await set_custom_price_filter(page, min_val, max_val)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.8)
 
             await browser.close()
     except Exception as e:
