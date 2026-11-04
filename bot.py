@@ -43,7 +43,6 @@ def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     accs[uid_str][phone] = sess_json
     save_accounts(accs)
 
-# Render HTTP Server with direct sync endpoint and CORS
 class SyncServer(BaseHTTPRequestHandler):
     def _set_headers(self, status=200):
         self.send_response(status)
@@ -81,13 +80,13 @@ class SyncServer(BaseHTTPRequestHandler):
                         asyncio.run_coroutine_threadsafe(
                             tg_app.bot.send_message(
                                 chat_id=int(uid),
-                                text=f"✅ **Account `{phone}` Successfully Sync Ho Gaya!**\n\nAb `/start` dabakar auto-buy setup karein.",
+                                text=f"✅ Account `{phone}` Successfully Sync Ho Gaya!\n\nAb `/start` dabakar setup karein.",
                                 parse_mode="Markdown"
                             ),
                             tg_app.loop
                         )
                     return
-            except Exception as e:
+            except Exception:
                 pass
             
             self._set_headers(400)
@@ -102,16 +101,34 @@ def run_server():
     server.serve_forever()
 
 def generate_user_bookmarklet(uid, phone) -> str:
-    # Seedha Render app ko sync request bhejta hai
-    return (
-        f"javascript:(function(){{"
-        f"var d={{}};for(var i=0;i<localStorage.length;i++){{var k=localStorage.key(i);d[k]=localStorage.getItem(k);}}"
-        f"fetch('https://dmapay-bot.onrender.com/sync?uid={uid}&phone={phone}',{{"
-        f"method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(d)}})"
-        f".then(r=>r.json()).then(res=>{{if(res.ok){{alert('✅ Account {phone} Sync Successful! Bot me /start karein.');}}else{{alert('❌ Error: Server error');}}}})"
-        f".catch(e=>alert('❌ Network Error: '+e));"
-        f"}})();"
+    url = f"https://dmapay-bot.onrender.com/sync?uid={uid}&phone={phone}"
+    js = (
+        "(function(){"
+        "try{"
+        "var d={};"
+        "for(var i=0;i<localStorage.length;i++){"
+        "var k=localStorage.key(i);"
+        "d[k]=localStorage.getItem(k);"
+        "}"
+        f"fetch('{url}',{{"
+        "method:'POST',"
+        "mode:'cors',"
+        "headers:{'Content-Type':'application/json'},"
+        "body:JSON.stringify(d)"
+        "}})"
+        ".then(function(r){return r.json();})"
+        ".then(function(res){"
+        "if(res&&res.ok){"
+        f"alert('✅ Account {phone} Sync Successful! Bot me /start karein.');"
+        "}else{"
+        "alert('❌ Server Response Error');"
+        "}"
+        "})"
+        ".catch(function(e){alert('❌ Network Error: '+e);});"
+        "}catch(err){alert('❌ Script Error: '+err);}"
+        "})();"
     )
+    return "javascript:" + js
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
@@ -126,20 +143,20 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     buttons = []
     for phone in accounts.keys():
-        buttons.append([InlineKeyboardButton(f"📱 {phone} (Auto-Buy Setup)", callback_data=f"setup_{phone}")])
+        buttons.append([InlineKeyboardButton(f"📱 {phone} (Setup)", callback_data=f"setup_{phone}")])
     
     buttons.append([InlineKeyboardButton("➕ Add Account / Sync", callback_data="add_acc")])
     
-    txt = "🤖 **DMAPay Auto-Buy Bot**\n\nApna account chunein ya naya account jodein:"
+    txt = "🤖 DMAPay Auto-Buy Bot\n\nApna account chunein ya naya account jodein:"
     if update.callback_query:
-        await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons))
 
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("👉 Apna **10-digit Phone Number** bhejein:", parse_mode="Markdown")
+    await query.edit_message_text("👉 Apna 10-digit Phone Number bhejein:")
     return ASK_PHONE
 
 async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,13 +168,10 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     bm = generate_user_bookmarklet(chat_id, phone)
     msg = (
-        f"✅ **Number `{phone}` Register Ho Gaya!**\n\n"
-        f"🔖 **Aapka Auto-Login Bookmark:**\n\n"
+        f"✅ Number `{phone}` Register Ho Gaya!\n\n"
+        f"🔖 Niche diye gaye Bookmark code ko copy karein:\n\n"
         f"`{bm}`\n\n"
-        f"📌 **Kaise Use Karein:**\n"
-        f"1. Is poore code ko copy karke browser me Bookmark banayein.\n"
-        f"2. Portal (`web.dmapay.vip`) par login karke ye Bookmark run karein.\n"
-        f"3. Turant sync alert aayega aur bot me confirmation mil jayegi!"
+        f"📌 web.dmapay.vip par login karke ye Bookmark run karein."
     )
     await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
     return ConversationHandler.END
@@ -169,18 +183,14 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['active_phone'] = phone
     
     await query.answer()
-    await query.edit_message_text(
-        f"📱 **Account: `{phone}`**\n\n"
-        "Ab apna **Amount ya Range** bhejein\n(Jaise exact `1000` ya range `1000-1500`):",
-        parse_mode="Markdown"
-    )
+    await query.edit_message_text(f"📱 Account: `{phone}`\n\nTarget Amount ya Range dalein (jaise 1000 ya 1000-1500):", parse_mode="Markdown")
 
 async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     text = update.message.text.strip()
     if '-' not in text and not text.isdigit():
-        await update.message.reply_text("❌ Sahi format dalein! Jaise `1000` ya `1000-1500`:")
+        await update.message.reply_text("❌ Sahi format dalein! Jaise 1000 ya 1000-1500:")
         return
     
     context.user_data['target_amount'] = text
@@ -188,11 +198,7 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_Mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_Amazon")],
         [InlineKeyboardButton("💳 All Modes", callback_data="pay_All")]
     ]
-    await update.message.reply_text(
-        f"✅ **Target Set:** `{text}`\n\nApna **Payment Mode** chunein:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"✅ Target: `{text}`\n\nPayment Mode chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -201,7 +207,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     phone = context.user_data.get('active_phone', '')
     target_amt = context.user_data.get('target_amount', '1000')
     
-    await query.edit_message_text(f"🚀 **Auto-Buy Active!**\n📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}", parse_mode="Markdown")
+    await query.edit_message_text(f"🚀 Auto-Buy Active!\n📱 {phone} | 💰 Target: {target_amt} | 💳 {pay_mode}")
 
 def main():
     global tg_app
@@ -224,7 +230,7 @@ def main():
     tg_app.add_handler(CallbackQueryHandler(payment_choice_callback, pattern="^pay_"))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_amount_input))
     
-    print("✅ DMAPay Bot Live...")
+    print("DMAPay Bot Live...")
     tg_app.run_polling()
 
 if __name__ == "__main__":
