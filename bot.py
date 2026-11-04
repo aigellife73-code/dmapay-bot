@@ -338,7 +338,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             min_val = float(parts[0].strip())
             max_val = float(parts[1].strip())
         except:
-            min_val, max_val = 700.0, 1000.0
+            min_val, max_val = 500.0, 1000.0
     else:
         try:
             min_val = max_val = float(target_amt.replace('₹','').strip())
@@ -367,28 +367,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            chip_text = None
-            if max_val <= 999:
-                chip_text = "0~999"
-            elif min_val >= 1000 and max_val <= 2999:
-                chip_text = "1000~2999"
-            
-            if chip_text:
-                try:
-                    chip_loc = page.get_by_text(chip_text, exact=True).first
-                    if await chip_loc.count() > 0:
-                        await chip_loc.click(force=True)
-                        await asyncio.sleep(1.5)
-                except Exception:
-                    pass
-
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
                 elapsed = int(time.time() - start_time)
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Check Notify Popup ("need to pay!") -> Click Go pay, update message, and STOP loop immediately
+                # 0. Check Notify Popup ("need to pay!") -> Click Go pay
                 notify_handled = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -448,29 +433,25 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(0.8)
                     continue
 
+                # 2. Smart DOM Scanner: Find any card with price in range and click its Buy button
                 target_info = await page.evaluate(r"""
                     ({minV, maxV}) => {
-                        let allEls = Array.from(document.querySelectorAll('button, div, span, a'));
-                        for (let el of allEls) {
-                            let directText = '';
-                            for (let node of el.childNodes) {
-                                if (node.nodeType === 3) directText += node.nodeValue;
-                            }
-                            if (directText.trim() !== 'Buy') continue;
-                            
-                            let rect = el.getBoundingClientRect();
-                            if (rect.top < 180 || rect.top > 750 || rect.left < 240 || rect.width < 30) continue;
-                            
-                            let card = el.parentElement;
-                            for (let i = 0; i < 6; i++) {
-                                if (!card) break;
-                                let cText = card.innerText || '';
-                                if (cText.includes('Price') && cText.includes('₹')) {
-                                    let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
-                                    if (m && m[1]) {
-                                        let val = parseFloat(m[1].replace(/,/g, ''));
-                                        if (val >= minV && val <= maxV) {
-                                            el.click();
+                        let cards = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
+                            let t = el.innerText || '';
+                            return t.includes('Price') && t.includes('Buy');
+                        });
+                        
+                        for (let card of cards) {
+                            let txt = card.innerText;
+                            let m = txt.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
+                            if (m && m[1]) {
+                                let val = parseFloat(m[1].replace(/,/g, ''));
+                                if (val >= minV && val <= maxV) {
+                                    let btn = Array.from(card.querySelectorAll('button, div, span')).find(b => (b.innerText || '').trim() === 'Buy' && b.children.length === 0);
+                                    if (btn) {
+                                        let rect = btn.getBoundingClientRect();
+                                        if (rect.top > 150 && rect.top < 780 && rect.width > 20) {
+                                            btn.click();
                                             return {
                                                 found: true,
                                                 amount: val,
@@ -478,9 +459,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                             };
                                         }
                                     }
-                                    break;
                                 }
-                                card = card.parentElement;
                             }
                         }
                         return {found: false};
@@ -488,7 +467,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """, {"minV": min_val, "maxV": max_val})
 
                 if target_info and target_info.get("found"):
-                    # Update status immediately on Telegram so user knows order matched!
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
@@ -657,14 +635,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                if chip_text:
-                    await page.evaluate(r"""(chip) => {
-                        let els = Array.from(document.querySelectorAll('div, span')).filter(e => (e.innerText || '').trim() === chip);
-                        if (els.length > 0) els[0].click();
-                    }""", chip_text)
-                else:
-                    await page.reload(wait_until="domcontentloaded")
-                await asyncio.sleep(1.5)
+                await page.reload(wait_until="domcontentloaded")
+                await asyncio.sleep(1.2)
 
             await browser.close()
     except Exception as e:
