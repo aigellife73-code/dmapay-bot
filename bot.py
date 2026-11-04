@@ -5,13 +5,9 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     filters, ContextTypes, ConversationHandler
 )
-from playwright.async_api import async_playwright
 
 BOT_TOKEN = "9105269973:AAFtunQsu9g4roxGUi2RYTt_dSahQdIqlVw"
-
 ACCOUNTS_FILE = "dmapay_accounts.json"
-SESSION_DIR = "dmapay_sessions"
-
 ASK_PHONE = range(1)
 last_sync_ts = 0
 
@@ -171,7 +167,6 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     context.user_data['target_amount'] = text
     phone = context.user_data.get('active_phone', 'Default')
-    chat_id = update.effective_chat.id
     
     buttons = [
         [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_Mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_Amazon")],
@@ -193,99 +188,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     phone = context.user_data.get('active_phone', '')
     target_amt = context.user_data.get('target_amount', '1000')
     
-    accounts = get_user_accounts(chat_id)
-    session_data = accounts.get(phone, {})
-    
-    await query.edit_message_text(f"🚀 **Auto-Buy & Auto-Search Started!**\n📱 `{phone}` | 💰 Range/Amt: `{target_amt}` | 💳 {pay_mode}\n\nBot background me scanning start kar raha hai...", parse_mode="Markdown")
-    
-    asyncio.create_task(run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode, context))
-
-async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode, context):
-    profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
-    os.makedirs(profile_dir, exist_ok=True)
-    
-    min_val, max_val = 0.0, 0.0
-    if '-' in target_amt:
-        parts = target_amt.split('-')
-        try:
-            min_val = float(parts[0].strip())
-            max_val = float(parts[1].strip())
-        except:
-            min_val = max_val = float(target_amt.replace('₹','').strip())
-    else:
-        try:
-            min_val = max_val = float(target_amt.replace('₹','').strip())
-        except:
-            min_val = max_val = 1000.0
-
-    try:
-        async with async_playwright() as p:
-            browser_context = await p.chromium.launch_persistent_context(
-                user_data_dir=profile_dir,
-                headless=True,
-                viewport={"width": 390, "height": 844},
-                user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
-            )
-            page = await browser_context.new_page()
-            
-            if session_data:
-                await page.goto("https://web.dmapay.vip", wait_until="commit", timeout=20000)
-                await asyncio.sleep(1)
-                await page.evaluate(r"""(data) => { for (let k in data) { localStorage.setItem(k, data[k]); } }""", session_data)
-            
-            await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
-            await asyncio.sleep(3)
-            
-            while True:
-                try:
-                    clicked = await page.evaluate(r"""
-                        ({minV, maxV}) => {
-                            let buttons = Array.from(document.querySelectorAll('button, div')).filter(el => (el.innerText || '').trim() === 'Buy');
-                            for (let btn of buttons) {
-                                let card = btn.closest('div');
-                                if (card) {
-                                    let txt = card.innerText;
-                                    let matches = txt.match(/₹\s*([0-9,]+(\.[0-9]{2})?)/);
-                                    if (matches && matches[1]) {
-                                        let val = parseFloat(matches[1].replace(/,/g, ''));
-                                        if (val >= minV && val <= maxV) {
-                                            btn.click();
-                                            return true;
-                                        }
-                                    }
-                                }
-                            }
-                            return false;
-                        }
-                    """, {"minV": min_val, "maxV": max_val})
-                    
-                    if clicked:
-                        await asyncio.sleep(1)
-                        await page.evaluate(r"""
-                            (mode) => {
-                                let options = Array.from(document.querySelectorAll('*'));
-                                for (let opt of options) {
-                                    if ((opt.innerText || '').toLowerCase().includes(mode.toLowerCase())) {
-                                        opt.click();
-                                        break;
-                                    }
-                                }
-                            }
-                        """, pay_mode)
-                        
-                        shot = await page.screenshot()
-                        await context.bot.send_photo(chat_id, photo=shot, caption=f"🎉 **Order Matched & Grabbed Successfully!**\nRange: {target_amt} | Mode: {pay_mode}", parse_mode="Markdown")
-                        break
-                    
-                    await page.reload(wait_until="domcontentloaded")
-                    await asyncio.sleep(2.5)
-                except Exception:
-                    await asyncio.sleep(2)
-            
-            await browser_context.close()
-    except Exception as e:
-        await context.bot.send_message(chat_id, f"❌ Auto-Buy Error: {str(e)}")
+    await query.edit_message_text(f"🚀 **Auto-Buy Started!**\n📱 `{phone}` | 💰 Range/Amt: `{target_amt}` | 💳 {pay_mode}\n\nBot active ho gaya hai!", parse_mode="Markdown")
 
 async def post_init_setup(app: Application):
     async def loop_sync():
@@ -316,7 +219,7 @@ def main():
     app.add_handler(CallbackQueryHandler(payment_choice_callback, pattern="^pay_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_amount_input))
     
-    print("✅ DMAPay Auto-Buy Bot Live...")
+    print("✅ DMAPay Bot Live...")
     app.run_polling()
 
 if __name__ == "__main__":
