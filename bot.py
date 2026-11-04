@@ -388,14 +388,47 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 1. Check if 'Failed to pick up order' Tips popup is present
+                # 0. Check if 'Notify' popup appeared ("You have a payment(...) need to pay!") -> Click 'Go pay'
+                notify_handled = await page.evaluate(r"""
+                    () => {
+                        let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+                        for (let d of divs) {
+                            let t = (d.innerText || '').trim();
+                            if (t.includes('need to pay!') || t === 'Notify') {
+                                let goPayBtn = divs.find(b => (b.innerText || '').trim() === 'Go pay');
+                                if (goPayBtn) {
+                                    goPayBtn.click();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                if notify_handled:
+                    await asyncio.sleep(1.5)
+                    # Once 'Go pay' is clicked, send screenshot and break loop
+                    shot = await page.screenshot(full_page=True)
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=shot,
+                        caption=(
+                            f"🎉 **Order Grabbed via Notify & Payment Page Opened!**\n"
+                            f"💰 **Target:** ₹{target_amt}\n"
+                            f"💳 **Mode:** {pay_mode}\n"
+                            f"⏱️ **Time Taken:** {timer_str}"
+                        ),
+                        parse_mode="Markdown"
+                    )
+                    break
+
+                # 1. Check if 'Failed to pick up order' Tips popup is present -> Click 'Stay'
                 popup_handled = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p'));
                         for (let d of divs) {
                             let t = (d.innerText || '').trim();
                             if (t.includes('Failed to pick up order') || t === 'Tips') {
-                                // Find 'Stay' button inside popup
                                 let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
                                 if (stayBtn) {
                                     stayBtn.click();
@@ -408,8 +441,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """)
 
                 if popup_handled:
-                    await asyncio.sleep(0.8) # Wait after clicking Stay
-                    continue # Continue scanning next order immediately
+                    await asyncio.sleep(0.8)
+                    continue
 
                 target_info = await page.evaluate(r"""
                     ({minV, maxV}) => {
@@ -453,11 +486,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 if target_info and target_info.get("found"):
                     await tap_element_center(page, target_info["box"])
                     
-                    # Wait for bottom popup or Failed popup
                     popup_type = "none"
                     for _ in range(15):
                         await asyncio.sleep(0.3)
                         body_txt = await page.evaluate("() => document.body.innerText")
+                        if "need to pay!" in body_txt or "Go pay" in body_txt:
+                            popup_type = "notify"
+                            break
                         if "Failed to pick up order" in body_txt:
                             popup_type = "failed"
                             break
@@ -465,8 +500,30 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             popup_type = "success"
                             break
                     
+                    if popup_type == "notify":
+                        await page.evaluate(r"""
+                            () => {
+                                let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+                                let goPayBtn = divs.find(b => (b.innerText || '').trim() === 'Go pay');
+                                if (goPayBtn) goPayBtn.click();
+                            }
+                        """)
+                        await asyncio.sleep(2)
+                        shot = await page.screenshot(full_page=True)
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=shot,
+                            caption=(
+                                f"🎉 **Order Grabbed & Payment Page Opened!**\n"
+                                f"💰 **Amount:** ₹{target_info.get('amount')}\n"
+                                f"💳 **Mode:** {pay_mode}\n"
+                                f"⏱️ **Time Taken:** {timer_str}"
+                            ),
+                            parse_mode="Markdown"
+                        )
+                        break
+
                     if popup_type == "failed":
-                        # Click 'Stay' and loop back to scan next
                         await page.evaluate(r"""
                             () => {
                                 let divs = Array.from(document.querySelectorAll('div, span, p'));
@@ -479,7 +536,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     await asyncio.sleep(0.6)
 
-                    # Select wallet & OK confirmation
                     tips_done = False
                     for _ in range(4):
                         await click_wallet_option(page, pay_mode)
@@ -487,8 +543,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         for _ in range(8):
                             await asyncio.sleep(0.3)
                             
-                            # Check if 'Failed to pick up order' appeared during wallet selection
                             body_txt = await page.evaluate("() => document.body.innerText")
+                            if "need to pay!" in body_txt or "Go pay" in body_txt:
+                                await page.evaluate(r"""
+                                    () => {
+                                        let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+                                        let goPayBtn = divs.find(b => (b.innerText || '').trim() === 'Go pay');
+                                        if (goPayBtn) goPayBtn.click();
+                                    }
+                                """)
+                                tips_done = "notify_done"
+                                break
+
                             if "Failed to pick up order" in body_txt:
                                 await page.evaluate(r"""
                                     () => {
@@ -534,7 +600,22 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         await asyncio.sleep(0.5)
                         continue
 
-                    # Wait for #/buyingbymod and bank details
+                    if tips_done == "notify_done":
+                        await asyncio.sleep(2)
+                        shot = await page.screenshot(full_page=True)
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=shot,
+                            caption=(
+                                f"🎉 **Order Grabbed & Payment Page Opened!**\n"
+                                f"💰 **Amount:** ₹{target_info.get('amount')}\n"
+                                f"💳 **Mode:** {pay_mode}\n"
+                                f"⏱️ **Time Taken:** {timer_str}"
+                            ),
+                            parse_mode="Markdown"
+                        )
+                        break
+
                     for _ in range(25):
                         await asyncio.sleep(0.4)
                         cur_url = page.url
@@ -552,7 +633,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             f"🎉 **Order Grabbed & Payment Page Opened!**\n"
                             f"💰 **Amount:** ₹{target_info.get('amount')}\n"
                             f"💳 **Mode:** {pay_mode}\n"
-                            f"🔗 **URL:** `{page.url}`\n"
                             f"⏱️ **Time Taken:** {timer_str}"
                         ),
                         parse_mode="Markdown"
