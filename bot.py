@@ -149,7 +149,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         f"📱 **Account: `{phone}`**\n\n"
-        f"Ab **Target Amount ya Range** bhejein (jaise `600-900` ya `1000`):",
+        f"Ab **Target Amount ya Range** bhejein (jaise `500`, `600-900` ya `1000`):",
         parse_mode="Markdown"
     )
 
@@ -197,7 +197,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
-        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `1000` ya `600-900`):")
+        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `500`, `1000` ya `600-900`):")
         return
 
     context.user_data['target_amount'] = text.replace(" ", "")
@@ -228,7 +228,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Browser starting...\n\n"
+        f"🔍 **Status:** Browser starting & setting filter...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -255,38 +255,93 @@ async def tap_element_center(page, box):
     cy = box["y"] + box["height"] / 2
     await tap_point(page, cx, cy)
 
-async def select_filter_chip(page, chip_text: str):
-    if not chip_text:
-        return
-    box = await page.evaluate(r"""
+async def apply_price_filter(page, min_val: float, max_val: float, chip_text: str):
+    """
+    1. Opens filter chip bar if collapsed (clicks arrow near Min/Max)
+    2. Clicks exact chip ('0~999', '1000~2999', 'All') using Playwright & JS
+    3. Also fills Min/Max inputs if present and clicks Search icon
+    """
+    # Step A: Try Playwright native text click on chip_text ('0~999' / '1000~2999' / 'All')
+    try:
+        loc = page.get_by_text(chip_text, exact=False).first
+        if await loc.count() > 0 and await loc.is_visible():
+            box = await loc.bounding_box()
+            if box:
+                await tap_element_center(page, box)
+                await asyncio.sleep(0.3)
+            await loc.click(force=True)
+            await asyncio.sleep(0.8)
+            return
+    except Exception:
+        pass
+
+    # Step B: If chip is hidden, click the dropdown toggle arrow next to 'Min' (around x=75, y=170)
+    arrow_box = await page.evaluate(r"""
+        () => {
+            let els = Array.from(document.querySelectorAll('div, span, i, svg'));
+            let minEl = els.find(e => (e.innerText || '').trim() === 'Min');
+            if (minEl) {
+                let r = minEl.getBoundingClientRect();
+                // Click slightly to the left of 'Min' where the v / ^ arrow is
+                return {x: Math.max(20, r.left - 30), y: r.top + r.height / 2};
+            }
+            return null;
+        }
+    """)
+    if arrow_box:
+        await tap_point(page, arrow_box["x"], arrow_box["y"])
+        await asyncio.sleep(0.6)
+
+    # Try clicking the chip again after opening drawer
+    chip_box = await page.evaluate(r"""
         (chip) => {
-            let all = Array.from(document.querySelectorAll('div, span, a, li, p'));
-            let best = null;
-            let bestArea = 999999;
-            for (let el of all) {
-                let t = (el.innerText || '').replace(/\s+/g, '').trim();
-                if (t === chip || (chip === 'All' && t === 'All')) {
-                    let r = el.getBoundingClientRect();
-                    // Filter chips are located in the upper section (y between 120 and 300)
-                    if (r.top > 110 && r.top < 310 && r.width > 15 && r.height > 10 && r.height < 60) {
-                        let area = r.width * r.height;
-                        if (area < bestArea) {
-                            bestArea = area;
-                            best = el;
+            let walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+            let node;
+            while (node = walker.nextNode()) {
+                let t = (node.nodeValue || '').trim();
+                if (t.includes(chip)) {
+                    let el = node.parentElement;
+                    if (el) {
+                        let r = el.getBoundingClientRect();
+                        if (r.width > 10 && r.height > 8 && r.top > 100 && r.top < 360) {
+                            el.click();
+                            return {x: r.left, y: r.top, width: r.width, height: r.height};
                         }
                     }
                 }
             }
-            if (best) {
-                best.click();
-                let r = best.getBoundingClientRect();
-                return {x: r.left, y: r.top, width: r.width, height: r.height};
-            }
             return null;
         }
     """, chip_text)
-    if box:
-        await tap_element_center(page, box)
+
+    if chip_box:
+        await tap_element_center(page, chip_box)
+        await asyncio.sleep(0.8)
+        return
+
+    # Step C: Fallback - Type directly into Min & Max inputs and click Search icon on the right
+    try:
+        inputs = await page.query_selector_all("input")
+        if len(inputs) >= 2:
+            f_min = "0" if max_val <= 999 else str(int(min_val))
+            f_max = "999" if max_val <= 999 else str(int(max_val))
+            await inputs[0].fill(f_min)
+            await inputs[1].fill(f_max)
+            # Tap search icon on far right of Min/Max row (x=355, y=170)
+            search_pt = await page.evaluate(r"""
+                () => {
+                    let inp = document.querySelectorAll('input')[1];
+                    if (inp) {
+                        let r = inp.getBoundingClientRect();
+                        return {x: 355, y: r.top + r.height / 2};
+                    }
+                    return {x: 355, y: 170};
+                }
+            """)
+            await tap_point(page, search_pt["x"], search_pt["y"])
+            await asyncio.sleep(0.8)
+    except Exception:
+        pass
 
 async def click_wallet_option(page, pay_mode: str):
     mode = pay_mode.lower().strip()
@@ -300,7 +355,7 @@ async def click_wallet_option(page, pay_mode: str):
                 if (!t || t.startsWith('wallets:') || t.includes('pay using') || t.includes('manage upi')) continue;
                 
                 let r = el.getBoundingClientRect();
-                if (r.top < 250 || r.top > 780 || r.height > 85 || r.height < 12) continue;
+                if (r.top < 240 || r.top > 790 || r.height > 90 || r.height < 12) continue;
                 
                 if (targetMode === 'mobikwik' && (t.includes('@mbk') || t === 'mobikwik')) {
                     targetEl = el;
@@ -379,7 +434,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
         except:
             min_val, max_val = 1000.0
 
-    # Decide which filter chip to activate
     if max_val <= 999:
         chip_text = "0~999"
     elif min_val >= 1000 and max_val <= 2999:
@@ -409,9 +463,21 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Activate correct filter chip (0~999 / 1000~2999 / All)
-            await select_filter_chip(page, chip_text)
-            await asyncio.sleep(1.5)
+            # Apply price range filter (e.g. 0~999 or 1000~2999)
+            await apply_price_filter(page, min_val, max_val, chip_text)
+            await asyncio.sleep(1.2)
+
+            # Send 1 Startup Screenshot so user can see what page/filter is open
+            try:
+                init_shot = await page.screenshot()
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=init_shot,
+                    caption=f"✅ **Browser Ready & Filter (`{chip_text}`) Applied!**\nAb `{target_amt}` ke orders scan ho rahe hain...",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -502,7 +568,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(0.6)
                     continue
 
-                # 3. Scan all visible Buy cards & also return list of visible prices for live debugging
+                # 3. Universal Card Scanner (works with any child structure inside Buy button)
                 scan_result = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let visiblePrices = [];
@@ -511,13 +577,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             let txt = (el.innerText || '').trim();
                             if (txt !== 'Buy') continue;
                             
-                            // Ignore parent wrappers that also happen to have innerText === 'Buy'
                             let hasSameChild = Array.from(el.children).some(c => (c.innerText || '').trim() === 'Buy');
                             if (hasSameChild) continue;
                             
                             let rect = el.getBoundingClientRect();
-                            // Order list area (y: 160 to 760, x > 220)
-                            if (rect.top < 160 || rect.top > 760 || rect.left < 220 || rect.width < 25) continue;
+                            if (rect.top < 150 || rect.top > 760 || rect.left < 200 || rect.width < 25) continue;
                             
                             let card = el.parentElement;
                             for (let i = 0; i < 7; i++) {
@@ -549,14 +613,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                 visible_prices = scan_result.get("prices", []) if scan_result else []
 
-                # Agar page par galat tab ke orders dikh rahe hain (jaise 1000 dikh raha hai jabki target <=999 hai), toh dubara chip click karo
+                # If wrong range prices are on screen (e.g. >1000 when user wants <=999), re-apply filter
                 if not scan_result.get("found"):
                     if max_val <= 999 and any(p >= 1000 for p in visible_prices):
-                        await select_filter_chip(page, "0~999")
-                        await asyncio.sleep(1.0)
+                        await apply_price_filter(page, min_val, max_val, "0~999")
+                        await asyncio.sleep(0.8)
                     elif min_val >= 1000 and any(p < 1000 for p in visible_prices):
-                        await select_filter_chip(page, "1000~2999")
-                        await asyncio.sleep(1.0)
+                        await apply_price_filter(page, min_val, max_val, "1000~2999")
+                        await asyncio.sleep(0.8)
 
                 if scan_result and scan_result.get("found"):
                     amt = scan_result.get("amount")
@@ -576,7 +640,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # Wait for Wallet Popup or Failed Popup
                     popup_type = "none"
                     for _ in range(15):
                         await asyncio.sleep(0.3)
@@ -591,7 +654,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             popup_type = "success"
                             break
 
-                    # STEP 1 SCREENSHOT: Buy Click hone ke baad ka screenshot
+                    # STEP 1 SCREENSHOT: Buy Click hone ke baad
                     try:
                         shot_buy = await page.screenshot()
                         await context.bot.send_photo(
@@ -642,7 +705,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # STEP 3: Handle 'OK' or 'Stay' (Failed to pick up order)
+                    # STEP 3: Handle 'OK' or 'Stay'
                     step_result = "unknown"
                     for _ in range(12):
                         await asyncio.sleep(0.3)
@@ -710,8 +773,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         except Exception:
                             pass
                         await asyncio.sleep(0.5)
-                        await select_filter_chip(page, chip_text)
-                        await asyncio.sleep(1.0)
+                        await apply_price_filter(page, min_val, max_val, chip_text)
+                        await asyncio.sleep(0.8)
                         continue
 
                     # STEP 4: Wait for Bank Details (IFSC / Account / Finish payment)
@@ -785,8 +848,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                await select_filter_chip(page, chip_text)
-                await asyncio.sleep(1.4)
+                # Refresh order list by clicking the active filter chip or search icon
+                await apply_price_filter(page, min_val, max_val, chip_text)
+                await asyncio.sleep(1.2)
 
             await browser.close()
     except Exception as e:
