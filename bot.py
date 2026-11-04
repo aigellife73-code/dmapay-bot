@@ -3,7 +3,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    filters, ContextTypes, ConversationHandler
+    filters, ContextTypes
 )
 from playwright.async_api import async_playwright
 
@@ -11,7 +11,6 @@ BOT_TOKEN = "9105269973:AAFtunQsu9g4roxGUi2RYTt_dSahQdIqlVw"
 ACCOUNTS_FILE = "dmapay_accounts.json"
 SESSION_DIR = "dmapay_sessions"
 
-ASK_PHONE = range(1)
 last_sync_ts = 0
 running_tasks = {}
 
@@ -80,26 +79,30 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
             return
         data = json.loads(raw)
         ts = int(data.get("t", 0))
-        if ts <= last_sync_ts:
-            return
-        last_sync_ts = ts
         uid = str(data.get("u", "")).strip()
         phone = str(data.get("p", "")).strip()
         fid = str(data.get("f", "")).strip()
         if not uid or not phone or not fid:
             return
         
+        # Check if already loaded in local file
+        existing_accs = get_user_accounts(int(uid))
+        if ts <= last_sync_ts and phone in existing_accs:
+            return
+
         tg_file = await context.bot.get_file(fid)
         b_arr = await tg_file.download_as_bytearray()
         sess_json = json.loads(b_arr.decode("utf-8"))
         if isinstance(sess_json, dict) and len(sess_json) > 0:
+            is_new_sync = (ts > last_sync_ts and last_sync_ts != 0) or (phone not in existing_accs)
+            last_sync_ts = ts
             save_user_session_clean(uid, phone, sess_json)
-            await context.bot.set_my_description(description="", language_code="zu")
-            await context.bot.send_message(
-                chat_id=int(uid),
-                text=f"✅ **Account `{phone}` Sync Ho Gaya!**\n\nAb `/start` dabayein.",
-                parse_mode="Markdown"
-            )
+            if is_new_sync:
+                await context.bot.send_message(
+                    chat_id=int(uid),
+                    text=f"✅ **Account `{phone}` Sync Ho Gaya!**\n\nAb `/start` dabakar अपना account select karein.",
+                    parse_mode="Markdown"
+                )
     except Exception:
         pass
 
@@ -109,6 +112,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user:
         return
+    
+    # Startup par cloud se session restore check karein
+    await poll_bookmark_sync(context)
     
     context.user_data.clear()
     accounts = get_user_accounts(user.id)
@@ -135,45 +141,88 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    context.user_data['state'] = 'WAIT_PHONE'
     await query.edit_message_text("👉 Apna **10-digit Phone Number** bhejein:", parse_mode="Markdown")
-    return ASK_PHONE
-
-async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = update.message.text.strip()
-    if not phone.isdigit() or len(phone) != 10:
-        await update.message.reply_text("❌ Sahi 10-digit number dalein:", reply_markup=ReplyKeyboardRemove())
-        return ASK_PHONE
-    chat_id = str(update.effective_chat.id)
-    bm = generate_user_bookmarklet(chat_id, phone)
-    msg = (
-        f"✅ **Number `{phone}` Registered!**\n\n"
-        f"🔖 **Auto-Login Bookmark:**\n\n`{bm}`\n\n"
-        f"📌 web.dmapay.vip login karke bookmark run karein."
-    )
-    await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    return ConversationHandler.END
 
 async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     phone = query.data.replace("setup_", "")
     context.user_data['active_phone'] = phone
+    context.user_data['state'] = 'WAIT_AMOUNT'
     await query.answer()
-    await query.edit_message_text(f"📱 **Account: `{phone}`**\n\nTarget Amount ya Range dalein (jaise `700-1000` ya `1000`):", parse_mode="Markdown")
+    await query.edit_message_text(
+        f"📱 **Account: `{phone}`**\n\n"
+        f"Ab **Target Amount ya Range** bhejein (jaise `700-1000` ya `1000`):",
+        parse_mode="Markdown"
+    )
 
-async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     text = update.message.text.strip()
-    if '-' not in text and not text.isdigit():
-        await update.message.reply_text("❌ Format galat hai! Jaise `700-1000` ya `1000` dalein:")
+    chat_id = str(update.effective_chat.id)
+    state = context.user_data.get('state', '')
+
+    # Rule 1: Agar user ne 10-digit Phone Number bheja hai (chahe button dabaya ho ya nahi)
+    if (text.isdigit() and len(text) == 10) or state == 'WAIT_PHONE':
+        if not text.isdigit() or len(text) != 10:
+            await update.message.reply_text("❌ Kripya sahi **10-digit Phone Number** dalein:", parse_mode="Markdown")
+            return
+        
+        context.user_data['state'] = ''
+        bm = generate_user_bookmarklet(chat_id, text)
+        
+        # Check if already synced in cloud
+        await poll_bookmark_sync(context)
+        accounts = get_user_accounts(int(chat_id))
+        extra_btn = []
+        if text in accounts:
+            extra_btn.append([InlineKeyboardButton(f"🚀 Direct Setup {text} (Already Synced)", callback_data=f"setup_{text}")])
+        
+        msg = (
+            f"✅ **Number `{text}` Registered!**\n\n"
+            f"🔖 **Auto-Login Bookmark Code:**\n\n`{bm}`\n\n"
+            f"📌 **Steps:**\n"
+            f"1. `web.dmapay.vip` par `{text}` login karke upar wala Bookmark run karein.\n"
+            f"2. Sync hote hi `/start` dabayein!"
+        )
+        await update.message.reply_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup(extra_btn) if extra_btn else ReplyKeyboardRemove(),
+            parse_mode="Markdown"
+        )
         return
-    
-    context.user_data['target_amount'] = text
+
+    # Rule 2: Agar user ne Amount ya Range bheja hai
+    active_phone = context.user_data.get('active_phone')
+    if not active_phone:
+        # Check if user already has 1 synced account, auto-select it
+        await poll_bookmark_sync(context)
+        accounts = get_user_accounts(int(chat_id))
+        if len(accounts) == 1:
+            active_phone = list(accounts.keys())[0]
+            context.user_data['active_phone'] = active_phone
+        else:
+            await update.message.reply_text("⚠️ Pehle `/start` dabakar apna Account select karein ya 10-digit Mobile Number bhejein!")
+            return
+
+    if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
+        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `1000` ya `700-1000`):")
+        return
+
+    context.user_data['target_amount'] = text.replace(" ", "")
+    context.user_data['state'] = ''
     buttons = [
         [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_amazon")],
         [InlineKeyboardButton("💳 Any / First Available", callback_data="pay_all")]
     ]
-    await update.message.reply_text(f"✅ **Target Set:** `{text}`\n\nPayment Mode chunein:", reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+    await update.message.reply_text(
+        f"📱 **Account:** `{active_phone}`\n"
+        f"✅ **Target Set:** `{context.user_data['target_amount']}`\n\n"
+        f"👇 Apna **Payment Mode** chunein:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+        parse_mode="Markdown"
+    )
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -216,88 +265,82 @@ async def tap_element_center(page, box):
     cy = box["y"] + box["height"] / 2
     await tap_point(page, cx, cy)
 
-async def select_wallet_in_popup(page, pay_mode: str):
+async def click_wallet_option(page, pay_mode: str):
     mode = pay_mode.lower().strip()
-    # Find exact wallet row inside the bottom popup (ignoring "Wallets: Mobikwik..." header)
-    wallet_info = await page.evaluate(r"""
+    # Exact row aur radio circle coordinate nikalna
+    coords = await page.evaluate(r"""
         (targetMode) => {
-            let all = Array.from(document.querySelectorAll('div, li, label, span, p'));
-            let candidates = [];
+            // Find the UPI ID text like @mbk or @yapl or wallet title inside popup
+            let nodes = Array.from(document.querySelectorAll('div, span, p, li, label'));
+            let targetEl = null;
             
-            for (let el of all) {
-                let txt = (el.innerText || '').trim();
-                let low = txt.toLowerCase();
-                if (!txt || low.startsWith('wallets:') || low.includes('pay using the following') || low.includes('manage upi')) {
-                    continue;
-                }
+            for (let el of nodes) {
+                let t = (el.innerText || '').trim().toLowerCase();
+                if (!t || t.startsWith('wallets:') || t.includes('pay using') || t.includes('manage upi')) continue;
                 
-                let rect = el.getBoundingClientRect();
-                // Popup rows appear in the middle/bottom area
-                if (rect.top < 250 || rect.height < 14 || rect.height > 95 || rect.width < 40) continue;
+                let r = el.getBoundingClientRect();
+                if (r.top < 260 || r.top > 750 || r.height > 80 || r.height < 12) continue;
                 
-                let match = false;
-                if (targetMode === 'mobikwik' && (low === 'mobikwik' || low.includes('@mbk') || (low.includes('mobikwik') && !low.includes('amazon')))) {
-                    match = true;
-                } else if (targetMode === 'amazon' && (low === 'amazon' || low.includes('@yapl') || (low.includes('amazon') && !low.includes('mobikwik')))) {
-                    match = true;
-                } else if (targetMode === 'all' && (low.includes('@') || low === 'mobikwik' || low === 'amazon')) {
-                    match = true;
-                }
-                
-                if (match) {
-                    candidates.push({
-                        el: el,
-                        area: rect.width * rect.height,
-                        hasAt: low.includes('@'),
-                        rect: {x: rect.left, y: rect.top, width: rect.width, height: rect.height}
-                    });
+                if (targetMode === 'mobikwik' && (t.includes('@mbk') || t === 'mobikwik')) {
+                    targetEl = el;
+                    if (t.includes('@mbk')) break;
+                } else if (targetMode === 'amazon' && (t.includes('@yapl') || t === 'amazon')) {
+                    targetEl = el;
+                    if (t.includes('@yapl')) break;
+                } else if (targetMode === 'all' && (t.includes('@') || t === 'mobikwik' || t === 'amazon')) {
+                    targetEl = el;
+                    break;
                 }
             }
             
-            if (candidates.length === 0) return null;
+            if (!targetEl) return null;
             
-            // Prefer container that has both wallet name and @upi (or tightest row)
-            candidates.sort((a, b) => {
-                if (a.hasAt !== b.hasAt) return a.hasAt ? -1 : 1;
-                return a.area - b.area;
-            });
-            
-            let best = candidates[0];
-            best.el.click();
-            
-            // Also click parent row & any radio/icon inside parent row
-            let row = best.el.parentElement;
-            for (let i = 0; i < 3; i++) {
-                if (!row) break;
-                row.click();
-                let radios = row.querySelectorAll('input, .van-radio, .van-icon, i, svg, span');
-                radios.forEach(r => { try { r.click(); } catch(e){} });
-                let rRect = row.getBoundingClientRect();
-                if (rRect.width > 200 && rRect.height < 90) {
-                    return {
-                        center: {x: rRect.left + rRect.width / 2, y: rRect.top + rRect.height / 2},
-                        radio: {x: rRect.right - 28, y: rRect.top + rRect.height / 2},
-                        left: {x: rRect.left + 80, y: rRect.top + rRect.height / 2}
-                    };
+            // Climb up to the full horizontal item row (width > 250)
+            let row = targetEl;
+            for (let i = 0; i < 4; i++) {
+                if (!row.parentElement) break;
+                let pr = row.parentElement.getBoundingClientRect();
+                if (pr.width >= 260 && pr.height <= 90) {
+                    row = row.parentElement;
+                    break;
                 }
                 row = row.parentElement;
             }
             
+            row.click();
+            targetEl.click();
+            
+            // Click any radio circle or icon inside the row
+            let children = row.querySelectorAll('*');
+            let radioRect = null;
+            for (let c of children) {
+                let cr = c.getBoundingClientRect();
+                // Right side radio circle (x > 300)
+                if (cr.left > 300 && cr.width >= 10 && cr.width <= 45) {
+                    c.click();
+                    radioRect = {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
+                }
+            }
+            
+            let rr = row.getBoundingClientRect();
+            let cy = rr.top + rr.height / 2;
             return {
-                center: {x: best.rect.x + best.rect.width / 2, y: best.rect.y + best.rect.height / 2},
-                radio: {x: 345, y: best.rect.y + best.rect.height / 2},
-                left: {x: 120, y: best.rect.y + best.rect.height / 2}
+                textX: rr.left + 110,
+                centerX: rr.left + rr.width / 2,
+                radioX: radioRect ? radioRect.x : (rr.right - 25),
+                y: radioRect ? radioRect.y : cy
             };
         }
     """, mode)
 
-    if wallet_info:
-        # Tap on text, center, and right-side radio circle
-        await tap_point(page, wallet_info["left"]["x"], wallet_info["left"]["y"])
-        await asyncio.sleep(0.15)
-        await tap_point(page, wallet_info["center"]["x"], wallet_info["center"]["y"])
-        await asyncio.sleep(0.15)
-        await tap_point(page, wallet_info["radio"]["x"], wallet_info["radio"]["y"])
+    if coords:
+        # 1. Tap on Radio Circle on the right
+        await tap_point(page, coords["radioX"], coords["y"])
+        await asyncio.sleep(0.2)
+        # 2. Tap on Text / Center of row
+        await tap_point(page, coords["textX"], coords["y"])
+        await asyncio.sleep(0.2)
+        await tap_point(page, coords["centerX"], coords["y"])
         return True
     return False
 
@@ -317,7 +360,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
         try:
             min_val = max_val = float(target_amt.replace('₹','').strip())
         except:
-            min_val, max_val = 1000.0
+            min_val = max_val = 1000.0
 
     try:
         async with async_playwright() as p:
@@ -405,38 +448,20 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     # 1. Tap Buy Button
                     await tap_element_center(page, target_info["box"])
                     
-                    # Wait for bottom popup to appear & finish slide animation
+                    # Wait for bottom popup
                     for _ in range(15):
                         await asyncio.sleep(0.3)
                         body_txt = await page.evaluate("() => document.body.innerText")
                         if "Pay using the following" in body_txt or "Manage UPI" in body_txt:
                             break
                     
-                    await asyncio.sleep(0.6) # Wait for slide-up animation to settle
+                    await asyncio.sleep(0.6)
 
                     # 2. Select Mobikwik / Amazon & wait for 'Tips' dialog ("OK")
-                    tips_clicked = False
-                    for attempt in range(4):
-                        await select_wallet_in_popup(page, pay_mode)
+                    tips_done = False
+                    for _ in range(4):
+                        await click_wallet_option(page, pay_mode)
                         
-                        # Also try Playwright native text locator click as backup
-                        try:
-                            if pay_mode.lower() == "mobikwik":
-                                loc = page.get_by_text("@mbk", exact=False).first
-                                if await loc.count() > 0:
-                                    await loc.click(force=True)
-                                else:
-                                    loc2 = page.get_by_text("mobikwik", exact=True).first
-                                    if await loc2.count() > 0:
-                                        await loc2.click(force=True)
-                            elif pay_mode.lower() == "amazon":
-                                loc = page.get_by_text("@yapl", exact=False).first
-                                if await loc.count() > 0:
-                                    await loc.click(force=True)
-                        except Exception:
-                            pass
-
-                        # Check for 'Tips' popup -> click 'OK'
                         for _ in range(8):
                             await asyncio.sleep(0.3)
                             ok_box = await page.evaluate(r"""
@@ -457,17 +482,17 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             """)
                             if ok_box:
                                 await tap_element_center(page, ok_box)
-                                tips_clicked = True
+                                tips_done = True
                                 break
                             
                             if "buyingbymod" in page.url:
-                                tips_clicked = True
+                                tips_done = True
                                 break
                         
-                        if tips_clicked:
+                        if tips_done:
                             break
 
-                    # 3. Wait until URL changes to #/buyingbymod and bank details load
+                    # 3. Wait for #/buyingbymod and bank details to populate
                     for _ in range(25):
                         await asyncio.sleep(0.4)
                         cur_url = page.url
@@ -540,21 +565,12 @@ def main():
     threading.Thread(target=run_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
     
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_acc_callback, pattern="^add_acc$")],
-        states={
-            ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, get_phone)],
-        },
-        fallbacks=[CommandHandler("start", start_cmd)],
-        allow_reentry=True
-    )
-    
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
-    app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(add_acc_callback, pattern="^add_acc$"))
     app.add_handler(CallbackQueryHandler(setup_callback, pattern="^setup_"))
     app.add_handler(CallbackQueryHandler(payment_choice_callback, pattern="^pay_"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_amount_input))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_all_text))
     
     print("DMAPay Bot Live...")
     app.run_polling()
