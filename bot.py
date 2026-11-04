@@ -228,7 +228,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Browser starting & setting Min-Max filter...\n\n"
+        f"🔍 **Status:** Setting Min & Max filter...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -279,10 +279,10 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
             await inputs[0].fill(str(int(min_val)))
             await inputs[1].click()
             await inputs[1].fill(str(int(max_val)))
-            await asyncio.sleep(0.2)
-            # Click 🔍 Search icon button rapidly and reliably
+            await asyncio.sleep(0.3)
+            # Click 🔍 Search icon button reliably
             await tap_point(page, 355, 170)
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(0.8)
     except Exception:
         pass
 
@@ -404,6 +404,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await set_custom_price_filter(page, min_val, max_val)
             await asyncio.sleep(1.2)
 
+            # Send Startup Screenshot immediately so user sees the filter applied
+            try:
+                init_shot = await page.screenshot()
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=init_shot,
+                    caption=f"✅ **Filter Applied (Min: {int(min_val)}, Max: {int(max_val)})!**\nScanning orders...",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
                 elapsed = int(time.time() - start_time)
@@ -493,7 +505,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(0.5)
                     continue
 
-                # 3. Sequential Single-Order Scanner (Pehle ek order par click karega)
+                # 3. Sequential Single-Order Scanner (Bari-bari se ek order click karega)
                 scan_result = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let visiblePrices = [];
@@ -518,7 +530,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                         let val = parseFloat(m[1].replace(/,/g, ''));
                                         visiblePrices.push(val);
                                         if (val >= minV && val <= maxV) {
-                                            el.click(); // Click ONLY ONE buy button at a time
+                                            el.click(); // Click ONLY ONE order at a time
                                             return {
                                                 found: true,
                                                 amount: val,
@@ -555,7 +567,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # STEP 1 SCREENSHOT: Buy click hote hi
+                    # STEP 1 SCREENSHOT: Buy Clicked
                     await asyncio.sleep(0.4)
                     try:
                         shot_buy = await page.screenshot()
@@ -568,11 +580,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    # Select Wallet (Mobikwik/Amazon)
+                    # Select Wallet (Mobikwik / Amazon)
                     await click_wallet_option(page, pay_mode)
                     await asyncio.sleep(0.5)
 
-                    # STEP 2 SCREENSHOT: Wallet select hote hi
+                    # STEP 2 SCREENSHOT: Wallet Selected
                     try:
                         shot_wallet = await page.screenshot()
                         await context.bot.send_photo(
@@ -639,12 +651,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if step_result == "failed_retry":
                         retry_count += 1
-                        await asyncio.sleep(0.8) # Slow & steady delay before trying next order
+                        await asyncio.sleep(0.8) # Gentle delay before checking next order
                         await set_custom_price_filter(page, min_val, max_val)
                         await asyncio.sleep(0.6)
                         continue
 
-                    # Wait for Final Bank Details Page
+                    # Wait for Final Bank Details
                     bank_loaded = False
                     for _ in range(25):
                         await asyncio.sleep(0.3)
@@ -715,7 +727,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Fast 🔍 search refresh click
+                # Quick 🔍 search refresh click
                 await set_custom_price_filter(page, min_val, max_val)
                 await asyncio.sleep(0.8)
 
