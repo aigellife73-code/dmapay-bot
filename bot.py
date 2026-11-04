@@ -129,11 +129,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id in running_tasks:
+    if chat_id in running_tasks and running_tasks[chat_id].get("active", False):
         running_tasks[chat_id]["active"] = False
         await update.message.reply_text("🛑 **Auto-Buy Scanning Rok Di Gayi!**", parse_mode="Markdown")
     else:
-        await update.message.reply_text("ℹ️ Koi task active nahi hai.")
+        await update.message.reply_text("ℹ️ Koi bhi Auto-Buy task active nahi hai.")
 
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -256,11 +256,7 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 async def set_custom_price_filter(page, min_val: float, max_val: float):
-    """
-    Types exact min and max values into the top filter inputs and clicks the search icon.
-    """
     try:
-        # Open filter drawer if collapsed (click arrow near Min/Max)
         arrow_box = await page.evaluate(r"""
             () => {
                 let els = Array.from(document.querySelectorAll('div, span, i, svg'));
@@ -274,7 +270,7 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
         """)
         if arrow_box:
             await tap_point(page, arrow_box["x"], arrow_box["y"])
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.4)
 
         inputs = await page.query_selector_all("input")
         if len(inputs) >= 2:
@@ -282,11 +278,9 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
             await inputs[0].fill(str(int(min_val)))
             await inputs[1].click()
             await inputs[1].fill(str(int(max_val)))
-            await asyncio.sleep(0.3)
-            
-            # Click Search magnifying glass icon (around x=355)
+            await asyncio.sleep(0.2)
             await tap_point(page, 355, 170)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.8)
     except Exception:
         pass
 
@@ -403,21 +397,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Type exact min and max values into filter
             await set_custom_price_filter(page, min_val, max_val)
-            await asyncio.sleep(1.2)
-
-            # Send Startup Screenshot
-            try:
-                init_shot = await page.screenshot()
-                await context.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=init_shot,
-                    caption=f"✅ **Custom Range ({target_amt}) Applied!**\nAb matching orders scan ho rahe hain...",
-                    parse_mode="Markdown"
-                )
-            except Exception:
-                pass
+            await asyncio.sleep(1.0)
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -425,7 +406,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Check if already on Final Bank Details Page (#/buyingbymod)
+                # 0. Check Bank Details Page (#/buyingbymod)
                 cur_url = page.url
                 b_text = await page.evaluate("() => document.body.innerText")
                 if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
@@ -436,7 +417,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         chat_id=chat_id,
                         photo=shot,
                         caption=(
-                            f"🎉 **Bank Details Aa Gayi! Auto-Buy Complete & Stopped!**\n"
+                            f"🎉 **Bank Details Aa Gayi! Task Complete!**\n"
                             f"💰 **Target:** `{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
@@ -444,7 +425,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # 1. Check if 'Notify' popup appeared -> Click 'Go pay'
+                # 1. Check Notify Popup ("need to pay!" -> Go pay)
                 notify_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -467,7 +448,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     for _ in range(20):
                         await asyncio.sleep(0.4)
                         bt = await page.evaluate("() => document.body.innerText")
-                        if "IFSC" in bt or "Account" in bt or "Upload Proof" in bt:
+                        if "IFSC" in bt or "Account" in bt:
                             break
                     await asyncio.sleep(1.0)
                     running_tasks[chat_id]["active"] = False
@@ -476,7 +457,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         chat_id=chat_id,
                         photo=shot,
                         caption=(
-                            f"🎉 **Order Grabbed (Notify -> Go Pay) & Bank Details Opened!**\n"
+                            f"🎉 **Order Grabbed & Bank Details Opened!**\n"
                             f"💰 **Target:** `{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
@@ -484,13 +465,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # 2. Check if 'Failed to pick up order' Tips popup is present -> Click 'Stay'
+                # 2. Handle 'Please slow down' / 'Failed to pick up order' -> Click 'Stay'
                 stay_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
                         for (let d of divs) {
                             let t = (d.innerText || '').trim();
-                            if (t.includes('Failed to pick up order') || t === 'Tips') {
+                            if (t.includes('Failed to pick up order') || t.includes('Please slow down') || t === 'Tips') {
                                 let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
                                 if (stayBtn) {
                                     stayBtn.click();
@@ -505,7 +486,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 if stay_box:
                     await tap_element_center(page, stay_box)
                     retry_count += 1
-                    await asyncio.sleep(0.6)
+                    await asyncio.sleep(0.4)
                     continue
 
                 # 3. Universal Card Scanner & Buy Click
@@ -553,11 +534,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                 visible_prices = scan_result.get("prices", []) if scan_result else []
 
-                # Re-apply filter if wrong prices appear on screen
                 if not scan_result.get("found"):
                     if any(p < min_val or p > max_val for p in visible_prices):
                         await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(0.8)
+                        await asyncio.sleep(0.5)
 
                 if scan_result and scan_result.get("found"):
                     amt = scan_result.get("amount")
@@ -577,31 +557,20 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
+                    # Wait for Wallet Popup or Tips popup
                     popup_type = "none"
-                    for _ in range(15):
-                        await asyncio.sleep(0.3)
+                    for _ in range(12):
+                        await asyncio.sleep(0.2)
                         body_txt = await page.evaluate("() => document.body.innerText")
                         if "need to pay!" in body_txt or "Go pay" in body_txt:
                             popup_type = "notify"
                             break
-                        if "Failed to pick up order" in body_txt:
+                        if "Failed to pick up order" in body_txt or "Please slow down" in body_txt:
                             popup_type = "failed"
                             break
                         if "Pay using the following" in body_txt or "Manage UPI" in body_txt:
                             popup_type = "success"
                             break
-
-                    # STEP 1 SCREENSHOT
-                    try:
-                        shot_buy = await page.screenshot()
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=shot_buy,
-                            caption=f"📸 **Step 1: Buy Clicked (₹{amt})!** Popup: `{popup_type}`",
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        pass
 
                     if popup_type == "failed":
                         s_box = await page.evaluate(r"""
@@ -619,36 +588,25 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         if s_box:
                             await tap_element_center(page, s_box)
                         retry_count += 1
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.4)
                         continue
 
                     if popup_type == "notify":
                         continue
 
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.4)
 
-                    # STEP 2: Click Mobikwik / Amazon & Send Screenshot
+                    # Select Wallet (Mobikwik/Amazon)
                     await click_wallet_option(page, pay_mode)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.4)
 
-                    try:
-                        shot_wallet = await page.screenshot()
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=shot_wallet,
-                            caption=f"📸 **Step 2: `{pay_mode}` Selected (₹{amt})!** Checking confirmation...",
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        pass
-
-                    # STEP 3: Handle 'OK' or 'Stay'
+                    # Handle 'OK' or 'Stay'
                     step_result = "unknown"
-                    for _ in range(12):
-                        await asyncio.sleep(0.3)
+                    for _ in range(10):
+                        await asyncio.sleep(0.2)
                         body_txt = await page.evaluate("() => document.body.innerText")
                         
-                        if "Failed to pick up order" in body_txt:
+                        if "Failed to pick up order" in body_txt or "Please slow down" in body_txt:
                             s_box = await page.evaluate(r"""
                                 () => {
                                     let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -697,31 +655,19 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if step_result == "failed_retry":
                         retry_count += 1
-                        try:
-                            await context.bot.edit_message_text(
-                                chat_id=chat_id,
-                                message_id=message_id,
-                                text=(
-                                    f"⚠️ **Order ₹{amt} Failed (Stay Clicked)!**\n"
-                                    f"🔄 Turant doosra `{target_amt}` order buy kar raha hai... (Retry #{retry_count})"
-                                ),
-                                parse_mode="Markdown"
-                            )
-                        except Exception:
-                            pass
-                        await asyncio.sleep(0.5)
+                        await asyncio.sleep(0.4)
                         await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(0.8)
+                        await asyncio.sleep(0.5)
                         continue
 
-                    # STEP 4: Wait for Bank Details (IFSC / Account / Finish payment)
+                    # Wait for Final Bank Details
                     bank_loaded = False
-                    for _ in range(25):
-                        await asyncio.sleep(0.4)
+                    for _ in range(20):
+                        await asyncio.sleep(0.3)
                         cur_url = page.url
                         b_text = await page.evaluate("() => document.body.innerText")
                         
-                        if "Failed to pick up order" in b_text:
+                        if "Failed to pick up order" in b_text or "Please slow down" in b_text:
                             s_box = await page.evaluate(r"""
                                 () => {
                                     let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -745,10 +691,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if not bank_loaded:
                         retry_count += 1
-                        await asyncio.sleep(0.6)
+                        await asyncio.sleep(0.4)
                         continue
 
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(1.0)
                     running_tasks[chat_id]["active"] = False
                     
                     shot_final = await page.screenshot(full_page=True)
@@ -785,9 +731,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Re-apply custom price filter inputs
                 await set_custom_price_filter(page, min_val, max_val)
-                await asyncio.sleep(1.2)
+                await asyncio.sleep(1.0)
 
             await browser.close()
     except Exception as e:
