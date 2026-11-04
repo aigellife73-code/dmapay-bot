@@ -1,6 +1,5 @@
-import asyncio, re, json, os, threading
+import asyncio, json, os, threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime, timezone, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
@@ -14,7 +13,6 @@ ACCOUNTS_FILE = "dmapay_accounts.json"
 SESSION_DIR = "dmapay_sessions"
 
 ASK_PHONE = range(1)
-user_sessions = {}
 last_sync_ts = 0
 
 class DummyServer(BaseHTTPRequestHandler):
@@ -145,14 +143,9 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📌 **Kaise Use Karein:**\n"
         f"1. Browser me is code ka Bookmark banayein.\n"
         f"2. Portal (`web.dmapay.vip`) par `{phone}` login karke ye Bookmark dabayein.\n"
-        f"3. Session automatic sync ho jayega aur bot me notification aa jayegi!"
+        f"3. Session automatic sync ho jayega!"
     )
     await update.message.reply_text(msg, reply_markup=ReplyKeyboardRemove(), parse_mode="Markdown")
-    return ConversationHandler.END
-
-async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("Process cancel ho gaya. /start karein.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,67 +173,16 @@ async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     phone = context.user_data.get('active_phone', 'Default')
     chat_id = update.effective_chat.id
     
-    await update.message.reply_text("🔍 Active payment modes check kiye ja rahe hain...")
-    
-    accounts = get_user_accounts(chat_id)
-    session_data = accounts.get(phone, {})
-    
-    active_modes = await fetch_active_payment_modes(session_data)
-    
-    buttons = []
-    for mode in active_modes:
-        buttons.append([InlineKeyboardButton(f"💳 {mode} (Active)", callback_data=f"pay_{mode}")])
-    buttons.append([InlineKeyboardButton("💳 All / Default Mode", callback_data="pay_Mobikwik")])
-    
+    buttons = [
+        [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_Mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_Amazon")],
+        [InlineKeyboardButton("💳 Paytm / Other", callback_data="pay_Other")]
+    ]
     await update.message.reply_text(
         f"✅ **Target Set:** `{text}`\n\n"
-        "Sirf **Active Payment Modes** detect huye hain, inme se chunein:",
+        "Apna **Payment Mode** chunein:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown"
     )
-
-async def fetch_active_payment_modes(session_data):
-    modes = []
-    try:
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
-            if session_data:
-                await page.goto("https://web.dmapay.vip", wait_until="commit", timeout=15000)
-                await asyncio.sleep(1)
-                await page.evaluate(r"""(data) => { for (let k in data) { localStorage.setItem(k, data[k]); } }""", session_data)
-            
-            await page.goto("https://web.dmapay.vip/#/kycpartner", wait_until="domcontentloaded", timeout=15000)
-            await asyncio.sleep(3)
-            
-            active_elements = await page.evaluate(r"""
-                () => {
-                    let items = Array.from(document.querySelectorAll('*'));
-                    let res = [];
-                    for (let el of items) {
-                        let txt = (el.innerText || '').trim();
-                        if (txt.toLowerCase() === 'active') {
-                            let parent = el.closest('div');
-                            if (parent) res.push(parent.innerText);
-                        }
-                    }
-                    return res;
-                }
-            """)
-            await browser.close()
-            
-            text_blob = " ".join(active_elements).lower()
-            if "mobikwik" in text_blob: modes.append("Mobikwik")
-            if "amazon" in text_blob: modes.append("Amazon")
-            if "paytm" in text_blob: modes.append("Paytm")
-            if "phonepe" in text_blob: modes.append("PhonePe")
-    except Exception:
-        pass
-    
-    if not modes:
-        modes = ["Mobikwik", "Amazon"]
-    return list(set(modes))
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -254,7 +196,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     accounts = get_user_accounts(chat_id)
     session_data = accounts.get(phone, {})
     
-    await query.edit_message_text(f"🚀 **Auto-Buy & Auto-Search Started!**\n📱 `{phone}` | 💰 Range/Amt: `{target_amt}` | 💳 {pay_mode}\n\nBot background me scanning aur timer start kar raha hai...", parse_mode="Markdown")
+    await query.edit_message_text(f"🚀 **Auto-Buy & Auto-Search Started!**\n📱 `{phone}` | 💰 Range/Amt: `{target_amt}` | 💳 {pay_mode}\n\nBot background me scanning start kar raha hai...", parse_mode="Markdown")
     
     asyncio.create_task(run_dmapay_autobuy(chat_id, phone, session_data, target_amt, pay_mode, context))
 
@@ -364,6 +306,8 @@ def main():
         states={
             ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, get_phone)],
         },
+        fallbacks=[CommandHandler("start", start_cmd)],
+        allow_reentry=True
     )
     
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
