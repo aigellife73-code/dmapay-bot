@@ -158,14 +158,14 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phone = query.data.replace("setup_", "")
     context.user_data['active_phone'] = phone
     await query.answer()
-    await query.edit_message_text(f"📱 **Account: `{phone}`**\n\nTarget Amount ya Range dalein (jaise `700-1000` ya `950`):", parse_mode="Markdown")
+    await query.edit_message_text(f"📱 **Account: `{phone}`**\n\nTarget Amount ya Range dalein (jaise `700-1000` ya `1000`):", parse_mode="Markdown")
 
 async def handle_amount_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     text = update.message.text.strip()
     if '-' not in text and not text.isdigit():
-        await update.message.reply_text("❌ Format galat hai! Jaise `700-1000` ya `950` dalein:")
+        await update.message.reply_text("❌ Format galat hai! Jaise `700-1000` ya `1000` dalein:")
         return
     
     context.user_data['target_amount'] = text
@@ -186,10 +186,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
     
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Started!**\n"
+        f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Browser open ho raha hai...\n\n"
+        f"🔍 **Status:** Scanning & Auto-Clicking active...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -217,7 +217,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
         try:
             min_val = max_val = float(target_amt.replace('₹','').strip())
         except:
-            min_val = max_val = 1000.0
+            min_val, max_val = 1000.0
 
     profile_dir = os.path.join(SESSION_DIR, f"profile_{chat_id}_{phone}")
     os.makedirs(profile_dir, exist_ok=True)
@@ -242,7 +242,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Website ka sahi filter tab click karna (jaise 0~999 ya 1000~2999)
+            # Sahi range ka tab click karna
             if max_val <= 999:
                 await page.evaluate(r"""() => {
                     let tabs = Array.from(document.querySelectorAll('*')).filter(el => (el.innerText || '').trim() === '0~999');
@@ -253,15 +253,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     let tabs = Array.from(document.querySelectorAll('*')).filter(el => (el.innerText || '').trim() === '1000~2999');
                     if (tabs.length > 0) tabs[0].click();
                 }""")
-            await asyncio.sleep(1)
-
-            init_shot = await page.screenshot()
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=init_shot,
-                caption=f"🔍 **Debug Screenshot:** Filter apply karke page load ho gaya hai!",
-                parse_mode="Markdown"
-            )
+            await asyncio.sleep(1.5)
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -269,6 +261,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
+                # Order match aur Buy click karne ka advanced logic
                 matched = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let cards = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
@@ -295,29 +288,41 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """, {"minV": min_val, "maxV": max_val})
 
                 if matched and matched.get("found"):
-                    await asyncio.sleep(1.2)
+                    await asyncio.sleep(1)
                     
+                    # 1. Payment mode select karna (Mobikwik / Amazon)
                     if pay_mode.lower() != "all":
                         await page.evaluate(r"""
                             (mode) => {
-                                let opts = Array.from(document.querySelectorAll('*')).filter(el => {
-                                    return (el.innerText || '').toLowerCase().includes(mode.toLowerCase()) && el.children.length === 0;
+                                let radios = Array.from(document.querySelectorAll('*')).filter(el => {
+                                    return (el.innerText || '').toLowerCase().includes(mode.toLowerCase()) && el.children.length <= 2;
                                 });
-                                if (opts.length > 0) opts[0].click();
+                                if (radios.length > 0) radios[0].click();
                             }
                         """, pay_mode)
+                        await asyncio.sleep(0.8)
+
+                    # 2. Tips popup par 'OK' ya confirm click karna
+                    await page.evaluate(r"""() => {
+                        let okBtns = Array.from(document.querySelectorAll('button, .van-button, div')).filter(el => {
+                            let t = (el.innerText || '').trim();
+                            return t === 'OK' || t === 'Confirm' || t === '确定';
+                        });
+                        if (okBtns.length > 0) okBtns[0].click();
+                    }""")
                     
-                    await asyncio.sleep(1)
-                    shot = await page.screenshot()
+                    await asyncio.sleep(2) # Final payment page load hone ka wait
+                    
+                    shot = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Order Buy Clicked Successfully!**\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Order Successful & Grabbed!**[span_1](start_span)[span_1](end_span)\n💰 Amount: ₹{matched.get('amount')}[span_2](start_span)[span_2](end_span)\n💳 Mode: {pay_mode}[span_3](start_span)[span_3](end_span)\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
 
-                if scan_count % 2 == 0:
+                if scan_count % 3 == 0:
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
@@ -327,7 +332,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans Done:** `{scan_count} baar`\n"
-                                f"🔍 **Status:** Orders scan ho rahe hain...\n\n"
+                                f"🔍 **Status:** Fast scanning orders...\n\n"
                                 f"🛑 Rokne ke liye `/stop` bhejein."
                             ),
                             parse_mode="Markdown"
@@ -336,7 +341,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         pass
 
                 await page.reload(wait_until="domcontentloaded")
-                await asyncio.sleep(2)
+                await asyncio.sleep(1.5)
 
             await browser.close()
     except Exception as e:
