@@ -242,12 +242,24 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Pehla debug screenshot taaki pata chale browser khula ya nahi
+            # Website ka sahi filter tab click karna (jaise 0~999 ya 1000~2999)
+            if max_val <= 999:
+                await page.evaluate(r"""() => {
+                    let tabs = Array.from(document.querySelectorAll('*')).filter(el => (el.innerText || '').trim() === '0~999');
+                    if (tabs.length > 0) tabs[0].click();
+                }""")
+            elif min_val >= 1000:
+                await page.evaluate(r"""() => {
+                    let tabs = Array.from(document.querySelectorAll('*')).filter(el => (el.innerText || '').trim() === '1000~2999');
+                    if (tabs.length > 0) tabs[0].click();
+                }""")
+            await asyncio.sleep(1)
+
             init_shot = await page.screenshot()
             await context.bot.send_photo(
                 chat_id=chat_id,
                 photo=init_shot,
-                caption=f"🔍 **Debug Screenshot:** Browser successfully open ho gaya hai aur page load ho gaya hai!",
+                caption=f"🔍 **Debug Screenshot:** Filter apply karke page load ho gaya hai!",
                 parse_mode="Markdown"
             )
 
@@ -257,7 +269,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # Order matching logic
                 matched = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let cards = Array.from(document.querySelectorAll('div, section, article')).filter(el => {
@@ -301,7 +312,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await context.bot.send_photo(
                         chat_id=chat_id,
                         photo=shot,
-                        caption=f"🎉 **Order Buy Clicked Successfully!**[span_1](start_span)[span_1](end_span)\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
+                        caption=f"🎉 **Order Buy Clicked Successfully!**\n💰 Amount: ₹{matched.get('amount')}\n💳 Mode: {pay_mode}\n⏱️ Time Taken: {timer_str}",
                         parse_mode="Markdown"
                     )
                     break
@@ -312,12 +323,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active!**[span_2](start_span)[span_2](end_span)\n"
+                                f"🚀 **Auto-Buy Active!**\n"
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
-                                f"⏱️ **Live Timer:** `{timer_str}`[span_3](start_span)[span_3](end_span)\n"
-                                f"🔄 **Scans Done:** `{scan_count} baar`[span_4](start_span)[span_4](end_span)\n"
+                                f"⏱️ **Live Timer:** `{timer_str}`\n"
+                                f"🔄 **Scans Done:** `{scan_count} baar`\n"
                                 f"🔍 **Status:** Orders scan ho rahe hain...\n\n"
-                                f"🛑 Rokne ke liye `/stop` bhejein[span_5](start_span)[span_5](end_span)."
+                                f"🛑 Rokne ke liye `/stop` bhejein."
                             ),
                             parse_mode="Markdown"
                         )
