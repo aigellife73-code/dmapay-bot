@@ -228,7 +228,7 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🚀 **Auto-Buy Fully Active!**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Setting Min & Max filter...\n\n"
+        f"🔍 **Status:** Setting smart price range filter...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -374,9 +374,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
     else:
         try:
             val = float(target_amt.replace('₹','').strip())
-            min_val = max_val = val
+            # Smart Range for single amounts (e.g. 500 -> 500 to 650, 1000 -> 1000 to 1150)
+            min_val = val
+            max_val = val + 150
         except:
-            min_val, max_val = 1000.0, 1000.0
+            min_val, max_val = 1000.0, 1150.0
 
     try:
         async with async_playwright() as p:
@@ -400,7 +402,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Set exact Min and Max range and click 🔍 search
+            # Set smart Min and Max range and click 🔍 search
             await set_custom_price_filter(page, min_val, max_val)
             await asyncio.sleep(1.2)
 
@@ -505,7 +507,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(0.5)
                     continue
 
-                # 3. Sequential Single-Order Scanner (Bari-bari se ek order click karega)
+                # 3. Sequential Single-Order Scanner
                 scan_result = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let visiblePrices = [];
@@ -530,7 +532,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                         let val = parseFloat(m[1].replace(/,/g, ''));
                                         visiblePrices.push(val);
                                         if (val >= minV && val <= maxV) {
-                                            el.click(); // Click ONLY ONE order at a time
+                                            el.click();
                                             return {
                                                 found: true,
                                                 amount: val,
@@ -651,7 +653,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if step_result == "failed_retry":
                         retry_count += 1
-                        await asyncio.sleep(0.8) # Gentle delay before checking next order
+                        await asyncio.sleep(0.8)
                         await set_custom_price_filter(page, min_val, max_val)
                         await asyncio.sleep(0.6)
                         continue
