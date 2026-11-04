@@ -467,11 +467,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 """, {"minV": min_val, "maxV": max_val})
 
                 if target_info and target_info.get("found"):
+                    running_tasks[chat_id]["active"] = False # Stop loop immediately
+                    
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
-                            text=f"🎉 **Order Match Ho Gaya! (₹{target_info.get('amount')}) Payment page open ho raha hai...**",
+                            text=f"🎯 **Order Match Ho Gaya! (₹{target_info.get('amount')}) Click kar diya gaya hai. Processing...**",
                             parse_mode="Markdown"
                         )
                     except Exception:
@@ -520,6 +522,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             }
                         """)
                         await asyncio.sleep(0.5)
+                        # Restart loop if failed
+                        running_tasks[chat_id]["active"] = True
                         continue
 
                     await asyncio.sleep(0.6)
@@ -586,6 +590,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     if tips_done == "failed_retry":
                         await asyncio.sleep(0.5)
+                        running_tasks[chat_id]["active"] = True
                         continue
 
                     if tips_done == "notify_done":
