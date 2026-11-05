@@ -389,6 +389,7 @@ async def tap_element_center(page, box):
 
 
 async def type_on_mand_keyboard(page, field_label: str, value_str: str):
+    # Click the fake input container for Min or Max
     box = await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -413,6 +414,7 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
     await tap_point(page, box["x"], box["y"])
     await asyncio.sleep(0.4)
 
+    # Completely clear existing digits by clicking delete multiple times
     for _ in range(8):
         del_box = await page.evaluate(r"""
             () => {
@@ -429,10 +431,11 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         """)
         if del_box:
             await tap_point(page, del_box["x"], del_box["y"])
-            await asyncio.sleep(0.15)
+            await asyncio.sleep(0.12)
         else:
             break
 
+    # Tap each digit of the new value slowly and accurately
     for ch in value_str:
         key_box = await page.evaluate(r"""
             (digit) => {
@@ -451,7 +454,7 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         """, ch)
         if key_box:
             await tap_point(page, key_box["x"], key_box["y"])
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.18)
 
     return True
 
@@ -464,6 +467,7 @@ async def set_min_max_via_keypad(page, min_val: float, max_val: float):
         await type_on_mand_keyboard(page, "Max", max_s)
         await asyncio.sleep(0.3)
 
+        # Click Confirm ('Ok') on number keyboard
         ok_box = await page.evaluate(r"""
             () => {
                 let oks = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.confirm'));
