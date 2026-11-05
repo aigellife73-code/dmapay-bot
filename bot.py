@@ -335,8 +335,28 @@ async def click_search_icon(page, max_bb, max_inp=None):
         await tap_point(page, 358, 125)
 
 
-async def set_custom_price_filter(page, min_val: float, max_val: float):
-    """fill() se Min/Max set karta hai (real typing jaisa) aur verify karta hai"""
+async def get_filter_area_html(page):
+    """Debug: Min/Max ke aas-paas ka raw HTML nikalta hai"""
+    try:
+        html = await page.evaluate(r"""
+            () => {
+                let minEl = Array.from(document.querySelectorAll('div, span')).find(e => (e.innerText || '').trim() === 'Min');
+                if (!minEl) return 'MIN LABEL NOT FOUND';
+                let container = minEl;
+                for (let i = 0; i < 3; i++) {
+                    if (container.parentElement) container = container.parentElement;
+                }
+                return container.outerHTML;
+            }
+        """)
+        return html or "EMPTY"
+    except Exception as e:
+        return f"HTML READ ERROR: {e}"
+
+
+async def set_custom_price_filter(page, min_val: float, max_val: float, debug_ctx=None):
+    """fill() se Min/Max set karta hai (real typing jaisa) aur verify karta hai.
+       debug_ctx = (context, chat_id) diya jaye to pehli baar screenshots + HTML bhejta hai."""
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
         for attempt in range(3):
@@ -356,29 +376,62 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
                     await inp.fill("")
                     await inp.fill(val)
                 except Exception:
-                    # fallback: purana tareeka
                     await inp.click(click_count=3)
                     await page.keyboard.press("Control+A")
                     await page.keyboard.press("Backspace")
                     await page.keyboard.type(val, delay=30)
                 await inp.evaluate(
                     "e => { e.dispatchEvent(new Event('input',{bubbles:true})); "
-                    "e.dispatchEvent(new Event('change',{bubbles:true})); }"
+                    "e.dispatchEvent(new Event('change',{bubbles:true})); "
+                    "e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true})); }"
                 )
                 await asyncio.sleep(0.2)
 
-            # Max input se blur karo taaki Vue model update ho jaye, search dabane se pehle
             try:
                 await max_inp.evaluate("e => e.blur()")
             except Exception:
                 pass
             await asyncio.sleep(0.3)
 
-            # Pehli baar set karte waqt search tap ke baad zyada wait (Vue settle)
+            # --- DEBUG: search dabaane se PEHLE ka state ---
+            if debug_ctx and attempt == 0:
+                ctx, chat_id = debug_ctx
+                try:
+                    pre_vals = await read_filter_values(page)
+                    shot_pre = await page.screenshot()
+                    await ctx.bot.send_photo(
+                        chat_id=chat_id, photo=shot_pre,
+                        caption=f"🔧 DEBUG: Search se PEHLE input values = {pre_vals}"
+                    )
+                    html_pre = await get_filter_area_html(page)
+                    await ctx.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"🔧 DEBUG HTML (search se pehle):\n<pre>{html_pre[:3500]}</pre>",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    try:
+                        await ctx.bot.send_message(chat_id=chat_id, text=f"Debug send error: {e}")
+                    except Exception:
+                        pass
+
             await click_search_icon(page, max_bb, max_inp)
             await asyncio.sleep(1.0 if attempt == 0 else 0.6)
 
             got = await read_filter_values(page)
+
+            # --- DEBUG: search dabaane ke BAAD ka state ---
+            if debug_ctx and attempt == 0:
+                ctx, chat_id = debug_ctx
+                try:
+                    shot_post = await page.screenshot()
+                    await ctx.bot.send_photo(
+                        chat_id=chat_id, photo=shot_post,
+                        caption=f"🔧 DEBUG: Search ke BAAD input values = {got}"
+                    )
+                except Exception:
+                    pass
+
             if len(got) >= 2 and got[0] == min_s and got[1] == max_s:
                 return True
         return False
@@ -620,7 +673,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            filter_ok = await set_custom_price_filter(page, min_val, max_val)
+            filter_ok = await set_custom_price_filter(page, min_val, max_val, debug_ctx=(context, chat_id))
             await asyncio.sleep(1.0)
 
             try:
