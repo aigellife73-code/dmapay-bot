@@ -280,6 +280,11 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 
+# ---------------------------------------------------------------
+# MIN / MAX FILTER
+# fill() se real-typing jaisa behave karta hai, aur verify se
+# pehle thoda zyada wait (Vue state settle hone ke liye)
+# ---------------------------------------------------------------
 async def get_filter_inputs(page):
     inputs = await page.query_selector_all("input")
     vis = []
@@ -331,6 +336,7 @@ async def click_search_icon(page, max_bb, max_inp=None):
 
 
 async def set_custom_price_filter(page, min_val: float, max_val: float):
+    """fill() se Min/Max set karta hai (real typing jaisa) aur verify karta hai"""
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
         for attempt in range(3):
@@ -345,18 +351,32 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
             max_bb = vis[1][3]
 
             for inp, val in ((min_inp, min_s), (max_inp, max_s)):
-                await inp.click(click_count=3)
-                await page.keyboard.press("Control+A")
-                await page.keyboard.press("Backspace")
-                await page.keyboard.type(val, delay=30)
+                try:
+                    await inp.click()
+                    await inp.fill("")
+                    await inp.fill(val)
+                except Exception:
+                    # fallback: purana tareeka
+                    await inp.click(click_count=3)
+                    await page.keyboard.press("Control+A")
+                    await page.keyboard.press("Backspace")
+                    await page.keyboard.type(val, delay=30)
                 await inp.evaluate(
                     "e => { e.dispatchEvent(new Event('input',{bubbles:true})); "
-                    "e.dispatchEvent(new Event('change',{bubbles:true})); e.blur(); }"
+                    "e.dispatchEvent(new Event('change',{bubbles:true})); }"
                 )
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.2)
 
+            # Max input se blur karo taaki Vue model update ho jaye, search dabane se pehle
+            try:
+                await max_inp.evaluate("e => e.blur()")
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+            # Pehli baar set karte waqt search tap ke baad zyada wait (Vue settle)
             await click_search_icon(page, max_bb, max_inp)
-            await asyncio.sleep(0.9)
+            await asyncio.sleep(1.0 if attempt == 0 else 0.6)
 
             got = await read_filter_values(page)
             if len(got) >= 2 and got[0] == min_s and got[1] == max_s:
@@ -367,6 +387,7 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
 
 
 async def refresh_filter(page, min_val: float, max_val: float):
+    """Values sahi hain to sirf search icon dabao (fast refresh), warna dobara set karo"""
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
         got = await read_filter_values(page)
@@ -374,6 +395,7 @@ async def refresh_filter(page, min_val: float, max_val: float):
             vis = await get_filter_inputs(page)
             if len(vis) >= 2:
                 await click_search_icon(page, vis[1][3], vis[1][2])
+                await asyncio.sleep(0.4)
                 return True
         return await set_custom_price_filter(page, min_val, max_val)
     except Exception:
@@ -450,6 +472,11 @@ async def click_wallet_option(page, pay_mode: str):
     return False
 
 
+# ---------------------------------------------------------------
+# STAY / FAILURE DETECTION
+# "Tips" sirf heading hai, success popup me bhi aata hai
+# ("pre-order is successful"). Sirf asli failure phrases detect karo.
+# ---------------------------------------------------------------
 STAY_JS = r"""
     () => {
         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -462,6 +489,91 @@ STAY_JS = r"""
         return null;
     }
 """
+
+# In exact phrases ke sath hi order kisi aur ne grab kiya maana jaye
+STAY_TRIGGER_TEXTS = ["Failed to pick up order", "Please slow down"]
+
+
+async def dismiss_stay_if_present(page):
+    """Agar 'order kisi aur ne grab kar liya' wala real failure popup dikhe to dismiss karo.
+       'pre-order is successful' wale Tips ko yahan se touch nahi karte."""
+    body_txt = await page.evaluate("() => document.body.innerText")
+    if any(t in body_txt for t in STAY_TRIGGER_TEXTS):
+        s_box = await page.evaluate(STAY_JS)
+        if s_box:
+            await tap_element_center(page, s_box)
+        return True
+    return False
+
+
+async def click_ok_if_success_tips(page):
+    """'pre-order is successful' Tips popup aaye to OK dabao"""
+    body_txt = await page.evaluate("() => document.body.innerText")
+    if "pre-order is successful" in body_txt.lower() or "successful" in body_txt.lower():
+        ok_box = await page.evaluate(r"""
+            () => {
+                let btns = Array.from(document.querySelectorAll('button, div, span'));
+                for (let b of btns) {
+                    let t = (b.innerText || '').trim();
+                    if (t === 'OK' || t === 'Confirm' || t === '确定') {
+                        let r = b.getBoundingClientRect();
+                        if (r.width > 25 && r.height > 18) {
+                            b.click();
+                            return {x: r.left, y: r.top, width: r.width, height: r.height};
+                        }
+                    }
+                }
+                return null;
+            }
+        """)
+        if ok_box:
+            await tap_element_center(page, ok_box)
+            return True
+    return False
+
+
+async def get_matching_orders(page, min_val, max_val):
+    result = await page.evaluate(r"""
+        ({minV, maxV}) => {
+            let allPrices = [];
+            let matched = [];
+            let items = Array.from(document.querySelectorAll('div.buyitem'));
+            items.forEach((item, idx) => {
+                let rItem = item.getBoundingClientRect();
+                if (rItem.width === 0 || rItem.left < 0 || rItem.left >= window.innerWidth) return;
+                let cText = item.innerText || '';
+                let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
+                if (m && m[1]) {
+                    let val = parseFloat(m[1].replace(/,/g, ''));
+                    allPrices.push(val);
+                    if (val >= minV && val <= maxV) {
+                        matched.push({idx: idx, amount: val});
+                    }
+                }
+            });
+            return {matched: matched, prices: allPrices};
+        }
+    """, {"minV": min_val, "maxV": max_val})
+    return result or {"matched": [], "prices": []}
+
+
+async def click_order_by_index(page, idx):
+    box = await page.evaluate(r"""
+        (i) => {
+            let items = document.querySelectorAll('div.buyitem');
+            let item = items[i];
+            if (!item) return null;
+            let btn = item.querySelector('button');
+            if (!btn) return null;
+            item.scrollIntoView({behavior: 'instant', block: 'center'});
+            let br = btn.getBoundingClientRect();
+            return {x: br.left, y: br.top, width: br.width, height: br.height};
+        }
+    """, idx)
+    if box and box["y"] > 0 and box["y"] < 840:
+        await tap_element_center(page, box)
+        return True
+    return False
 
 
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
@@ -509,7 +621,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await asyncio.sleep(3)
 
             filter_ok = await set_custom_price_filter(page, min_val, max_val)
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(1.0)
 
             try:
                 init_shot = await page.screenshot()
@@ -589,78 +701,38 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                stay_box = await page.evaluate(r"""
-                    () => {
-                        let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-                        for (let d of divs) {
-                            let t = (d.innerText || '').trim();
-                            if (t.includes('Failed to pick up order') || t.includes('Please slow down') || t === 'Tips') {
-                                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                if (stayBtn) {
-                                    stayBtn.click();
-                                    let r = stayBtn.getBoundingClientRect();
-                                    return {x: r.left, y: r.top, width: r.width, height: r.height};
-                                }
-                            }
-                        }
-                        return null;
-                    }
-                """)
-                if stay_box:
-                    await tap_element_center(page, stay_box)
+                if await dismiss_stay_if_present(page):
                     retry_count += 1
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.5)
                     continue
 
-                scan_result = await page.evaluate(r"""
-                    ({minV, maxV}) => {
-                        let allPrices = [];
-                        let items = Array.from(document.querySelectorAll('div.buyitem'));
+                # -------------------------------------------------
+                # Sabhi matching orders ki list lo, ek-ek karke try karo
+                # -------------------------------------------------
+                scan_data = await get_matching_orders(page, min_val, max_val)
+                matched_list = scan_data.get("matched", [])
+                visible_prices = scan_data.get("prices", [])
 
-                        for (let item of items) {
-                            let rItem = item.getBoundingClientRect();
-                            if (rItem.width === 0 || rItem.left < 0 || rItem.left >= window.innerWidth) continue;
+                order_success = False
+                amt = None
 
-                            let cText = item.innerText || '';
-                            let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
-                            if (m && m[1]) {
-                                let val = parseFloat(m[1].replace(/,/g, ''));
-                                allPrices.push(val);
+                for m_item in matched_list:
+                    if not running_tasks.get(chat_id, {}).get("active", False):
+                        break
 
-                                if (val >= minV && val <= maxV) {
-                                    let btn = item.querySelector('button');
-                                    if (btn) {
-                                        item.scrollIntoView({behavior: 'instant', block: 'center'});
-                                        btn.click();
-                                        let br = btn.getBoundingClientRect();
-                                        return {
-                                            found: true,
-                                            amount: val,
-                                            box: {x: br.left, y: br.top, width: br.width, height: br.height},
-                                            prices: allPrices
-                                        };
-                                    }
-                                }
-                            }
-                        }
-                        return {found: false, prices: allPrices};
-                    }
-                """, {"minV": min_val, "maxV": max_val})
+                    idx = m_item["idx"]
+                    amt = m_item["amount"]
 
-                visible_prices = scan_result.get("prices", []) if scan_result else []
-
-                if scan_result and scan_result.get("found"):
-                    amt = scan_result.get("amount")
-                    box = scan_result.get("box")
-                    if box and box["y"] > 0 and box["y"] < 840:
-                        await tap_element_center(page, box)
+                    clicked = await click_order_by_index(page, idx)
+                    if not clicked:
+                        continue
 
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🎯 **Order Match Ho Gaya! (₹{amt})**\n"
+                                f"🎯 **Order Try Ho Raha Hai! (₹{amt})**\n"
                                 f"💳 `{pay_mode}` select ho raha hai...\n"
                                 f"⏱️ Timer: `{timer_str}` | 🔄 Retries: `{retry_count}`"
                             ),
@@ -669,7 +741,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.5)
+
+                    # real failure (kisi aur ne grab kiya) hi dismiss karo
+                    if await dismiss_stay_if_present(page):
+                        retry_count += 1
+                        await asyncio.sleep(1.2)
+                        continue
+
                     try:
                         shot_buy = await page.screenshot()
                         await context.bot.send_photo(
@@ -684,6 +763,15 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await click_wallet_option(page, pay_mode)
                     await asyncio.sleep(3.0)
 
+                    # yahan "pre-order is successful" wala Tips aa sakta hai -> OK dabao
+                    await click_ok_if_success_tips(page)
+                    await asyncio.sleep(0.5)
+
+                    if await dismiss_stay_if_present(page):
+                        retry_count += 1
+                        await asyncio.sleep(1.2)
+                        continue
+
                     try:
                         shot_wallet = await page.screenshot()
                         await context.bot.send_photo(
@@ -697,17 +785,16 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     step_result = "unknown"
                     for _ in range(15):
-                        await asyncio.sleep(0.3)
-                        body_txt = await page.evaluate("() => document.body.innerText")
+                        body_txt2 = await page.evaluate("() => document.body.innerText")
 
-                        if "Failed to pick up order" in body_txt or "Please slow down" in body_txt or "Tips" in body_txt:
+                        if any(t in body_txt2 for t in STAY_TRIGGER_TEXTS):
                             s_box = await page.evaluate(STAY_JS)
                             if s_box:
                                 await tap_element_center(page, s_box)
                             step_result = "failed_retry"
                             break
 
-                        if "need to pay!" in body_txt or "Go pay" in body_txt:
+                        if "need to pay!" in body_txt2 or "Go pay" in body_txt2:
                             step_result = "notify_ready"
                             break
 
@@ -736,35 +823,41 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             step_result = "ok_clicked"
                             break
 
+                        await asyncio.sleep(1.0)
+
                     if step_result == "failed_retry":
                         retry_count += 1
                         await asyncio.sleep(1.2)
-                        await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(1.0)
                         continue
 
                     bank_loaded = False
                     for _ in range(30):
-                        await asyncio.sleep(0.4)
-                        cur_url = page.url
-                        b_text = await page.evaluate("() => document.body.innerText")
+                        cur_url2 = page.url
+                        b_text2 = await page.evaluate("() => document.body.innerText")
 
-                        if "Failed to pick up order" in b_text or "Please slow down" in b_text:
+                        if any(t in b_text2 for t in STAY_TRIGGER_TEXTS):
                             s_box = await page.evaluate(STAY_JS)
                             if s_box:
                                 await tap_element_center(page, s_box)
                             bank_loaded = False
                             break
 
-                        if ("buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text or "Finish payment" in b_text)):
+                        if ("buyingbymod" in cur_url2 and ("IFSC" in b_text2 or "Account" in b_text2 or "Upload Proof" in b_text2 or "Finish payment" in b_text2)):
                             bank_loaded = True
                             break
 
+                        await asyncio.sleep(1.0)
+
                     if not bank_loaded:
                         retry_count += 1
-                        await asyncio.sleep(0.8)
+                        await asyncio.sleep(1.0)
                         continue
 
+                    # ✅ Bank details aa gayi -> order confirmed, bot yahin stop karega
+                    order_success = True
+                    break
+
+                if order_success:
                     await asyncio.sleep(1.5)
                     running_tasks[chat_id]["active"] = False
 
@@ -804,7 +897,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         pass
 
                 await refresh_filter(page, min_val, max_val)
-                await asyncio.sleep(1.2)
+                await asyncio.sleep(1.0)
 
             await browser.close()
     except Exception as e:
