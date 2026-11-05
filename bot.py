@@ -378,101 +378,35 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 
-async def type_on_mand_keyboard(page, field_label: str, value_str: str):
-    box = await page.evaluate(r"""
-        (labelTxt) => {
-            let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
-            for (let item of items) {
-                let r = item.getBoundingClientRect();
-                if (r.left < 0 || r.width === 0) continue;
-                let lbl = item.querySelector('.md-field-item-title');
-                if (lbl && (lbl.innerText || '').trim() === labelTxt) {
-                    let fake = item.querySelector('.md-input-item-fake') || item;
-                    fake.click();
-                    let fr = fake.getBoundingClientRect();
-                    return {x: fr.left + fr.width / 2, y: fr.top + fr.height / 2};
-                }
-            }
-            return null;
-        }
-    """, field_label)
-
-    if not box:
-        return False
-
-    await tap_point(page, box["x"], box["y"])
-    await asyncio.sleep(0.5)
-
-    # Clear existing value using multiple delete taps or clear button
-    for _ in range(8):
-        del_box = await page.evaluate(r"""
-            () => {
-                let dels = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.delete'));
-                for (let d of dels) {
-                    let r = d.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
-                        d.click();
-                        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
-                    }
-                }
-                return null;
-            }
-        """)
-        if del_box:
-            await tap_point(page, del_box["x"], del_box["y"])
-            await asyncio.sleep(0.15)
-        else:
-            break
-
-    # Tap each digit slowly with reliable delay
-    for ch in value_str:
-        key_box = await page.evaluate(r"""
-            (digit) => {
-                let keys = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-number-item'));
-                for (let k of keys) {
-                    let r = k.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
-                        if ((k.innerText || '').trim() === digit) {
-                            k.click();
-                            return {x: r.left + r.width / 2, y: r.top + r.height / 2};
-                        }
-                    }
-                }
-                return null;
-            }
-        """, ch)
-        if key_box:
-            await tap_point(page, key_box["x"], key_box["y"])
-            await asyncio.sleep(0.2)
-
-    return True
-
-
-async def set_min_max_via_keypad(page, min_val: float, max_val: float):
+async def set_min_max_via_js(page, min_val: float, max_val: float):
+    """
+    Directly sets the range on Vue.js fake inputs and components without messing with the broken keypad.
+    """
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
-        await type_on_mand_keyboard(page, "Min", min_s)
-        await asyncio.sleep(0.4)
-        await type_on_mand_keyboard(page, "Max", max_s)
-        await asyncio.sleep(0.4)
+        await page.evaluate(r"""
+            ({minV, maxV}) => {
+                let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
+                if (items.length >= 2) {
+                    // Update Min fake span/text
+                    let minSpan = items[0].querySelector('.md-input-item-fake span');
+                    if (minSpan) minSpan.innerText = minV;
+                    let minFake = items[0].querySelector('.md-input-item-fake');
+                    if (minFake) {
+                        minFake.classList.remove('is-waiting');
+                    }
 
-        ok_box = await page.evaluate(r"""
-            () => {
-                let oks = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.confirm'));
-                for (let ok of oks) {
-                    let r = ok.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
-                        ok.click();
-                        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+                    // Update Max fake span/text
+                    let maxSpan = items[1].querySelector('.md-input-item-fake span');
+                    if (maxSpan) maxSpan.innerText = maxV;
+                    let maxFake = items[1].querySelector('.md-input-item-fake');
+                    if (maxFake) {
+                        maxFake.classList.remove('is-waiting');
                     }
                 }
-                return null;
             }
-        """)
-        if ok_box:
-            await tap_point(page, ok_box["x"], ok_box["y"])
-            await asyncio.sleep(0.5)
-
+        """, {"minV": min_s, "maxV": max_s})
+        await asyncio.sleep(0.3)
         await trigger_refresh_arrows_or_search(page, use_search=True)
         return True
     except Exception:
@@ -720,7 +654,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2.5)
 
-            await set_min_max_via_keypad(page, min_val, max_val)
+            await set_min_max_via_js(page, min_val, max_val)
             await asyncio.sleep(0.8)
 
             while running_tasks.get(chat_id, {}).get("active", False):
