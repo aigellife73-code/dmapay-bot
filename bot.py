@@ -611,7 +611,9 @@ async def get_matching_orders(page, min_val, max_val):
 
 
 async def click_order_by_index(page, idx):
-    box = await page.evaluate(r"""
+    """JS .click() seedha button element par - floating icons (support bubble waghera)
+       ke upar baithe hone se bhi click sahi jagah hi jaata hai (coordinate-tap nahi)"""
+    result = await page.evaluate(r"""
         (i) => {
             let items = document.querySelectorAll('div.buyitem');
             let item = items[i];
@@ -620,11 +622,35 @@ async def click_order_by_index(page, idx):
             if (!btn) return null;
             item.scrollIntoView({behavior: 'instant', block: 'center'});
             let br = btn.getBoundingClientRect();
+            btn.click();
             return {x: br.left, y: br.top, width: br.width, height: br.height};
         }
     """, idx)
-    if box and box["y"] > 0 and box["y"] < 840:
-        await tap_element_center(page, box)
+    if result and result["y"] > 0 and result["y"] < 840:
+        # Redundancy ke liye coordinate tap bhi, par JS click() upar already ho chuka hai
+        await tap_element_center(page, result)
+        return True
+    return bool(result)
+
+
+async def is_wrong_page(page):
+    """Kabhi kabhi galat jagah (jaise Customer Service page) khul jaata hai -
+       usse detect karke wapas jao"""
+    body_txt = await page.evaluate("() => document.body.innerText")
+    if "Customer Service" in body_txt and "Buy" not in body_txt:
+        try:
+            await page.go_back(wait_until="domcontentloaded", timeout=8000)
+        except Exception:
+            back_box = await page.evaluate(r"""
+                () => {
+                    let el = document.querySelector('.van-nav-bar__left, .van-icon-arrow-left');
+                    if (el) { let r = el.getBoundingClientRect(); el.click(); return {x:r.left,y:r.top,width:r.width,height:r.height}; }
+                    return null;
+                }
+            """)
+            if back_box:
+                await tap_element_center(page, back_box)
+        await asyncio.sleep(1.0)
         return True
     return False
 
@@ -795,6 +821,15 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         pass
 
                     await asyncio.sleep(1.5)
+
+                    # Galti se Customer Service / kisi aur page pe chale gaye to wapas aao
+                    if await is_wrong_page(page):
+                        retry_count += 1
+                        await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
+                        await asyncio.sleep(1.5)
+                        await set_custom_price_filter(page, min_val, max_val)
+                        await asyncio.sleep(1.0)
+                        continue
 
                     # real failure (kisi aur ne grab kiya) hi dismiss karo
                     if await dismiss_stay_if_present(page):
