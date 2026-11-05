@@ -247,10 +247,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
 
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Active (Native Min-Max)**\n"
+        f"🚀 **Auto-Buy Active (Fixed Min-Max)**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Forcing Min-Max filter range...\n\n"
+        f"🔍 **Status:** Setting Min-Max range & refreshing...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -281,176 +281,81 @@ async def tap_element_center(page, box):
 
 
 # ---------------------------------------------------------------
-# MIN / MAX FILTER
-# fill() se real-typing jaisa behave karta hai, aur verify se
-# pehle thoda zyada wait (Vue state settle hone ke liye)
+# ROBUST MIN / MAX FILTER SETTER
 # ---------------------------------------------------------------
-async def get_filter_inputs(page):
-    inputs = await page.query_selector_all("input")
-    vis = []
-    for inp in inputs:
-        try:
-            bb = await inp.bounding_box()
-        except Exception:
-            bb = None
-        if bb and bb["width"] > 15 and bb["height"] > 10 and bb["y"] < 300:
-            vis.append((round(bb["y"] / 20), bb["x"], inp, bb))
-    vis.sort(key=lambda t: (t[0], t[1]))
-    return vis
-
-
-async def read_filter_values(page):
-    return await page.evaluate(r"""
-        () => Array.from(document.querySelectorAll('input'))
-            .filter(i => {
-                let r = i.getBoundingClientRect();
-                return r.width > 15 && r.height > 10 && r.top < 300;
-            })
-            .slice(0, 2).map(i => i.value)
-    """)
-
-
-async def click_search_icon(page, max_bb, max_inp=None):
-    icon = await page.evaluate(r"""
-        (mx) => {
-            let best = null;
-            for (let e of document.querySelectorAll('svg, i, img, span, div')) {
-                let r = e.getBoundingClientRect();
-                if (r.width < 14 || r.width > 50 || r.height < 14 || r.height > 50) continue;
-                if (r.left < mx.x + mx.width) continue;
-                if (Math.abs((r.top + r.height / 2) - (mx.y + mx.height / 2)) > 20) continue;
-                if (!best || r.left > best.left) best = r;
-            }
-            return best ? {x: best.left + best.width / 2, y: best.top + best.height / 2} : null;
-        }
-    """, max_bb)
-    if icon:
-        await tap_point(page, icon["x"], icon["y"])
-    elif max_inp is not None:
-        try:
-            await max_inp.press("Enter")
-        except Exception:
-            pass
-    else:
-        await tap_point(page, 358, 125)
-
-
-async def get_filter_area_html(page):
-    """Debug: Min/Max ke aas-paas ka raw HTML nikalta hai"""
+async def set_custom_price_filter(page, min_val: float, max_val: float):
+    min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
-        html = await page.evaluate(r"""
+        # 1. Check if Min/Max inputs are already visible, if not click the filter expand arrow
+        inputs_visible = await page.evaluate(r"""
             () => {
-                let minEl = Array.from(document.querySelectorAll('div, span')).find(e => (e.innerText || '').trim() === 'Min');
-                if (!minEl) return 'MIN LABEL NOT FOUND';
-                let container = minEl;
-                for (let i = 0; i < 3; i++) {
-                    if (container.parentElement) container = container.parentElement;
-                }
-                return container.outerHTML;
+                let inputs = Array.from(document.querySelectorAll('input'));
+                return inputs.some(i => {
+                    let r = i.getBoundingClientRect();
+                    return r.width > 15 && r.height > 10 && r.top < 300;
+                });
             }
         """)
-        return html or "EMPTY"
-    except Exception as e:
-        return f"HTML READ ERROR: {e}"
 
+        if not inputs_visible:
+            arrow_pos = await page.evaluate(r"""
+                () => {
+                    let allEls = Array.from(document.querySelectorAll('div, span, i, svg'));
+                    let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min');
+                    if (minEl) {
+                        let r = minEl.getBoundingClientRect();
+                        return {x: Math.max(20, r.left - 25), y: r.top + r.height / 2};
+                    }
+                    return {x: 62, y: 125};
+                }
+            """)
+            if arrow_pos:
+                await tap_point(page, arrow_pos["x"], arrow_pos["y"])
+                await asyncio.sleep(0.5)
 
-async def set_custom_price_filter(page, min_val: float, max_val: float, debug_ctx=None):
-    """fill() se Min/Max set karta hai (real typing jaisa) aur verify karta hai.
-       debug_ctx = (context, chat_id) diya jaye to pehli baar screenshots + HTML bhejta hai."""
-    min_s, max_s = str(int(min_val)), str(int(max_val))
-    try:
-        for attempt in range(3):
-            vis = await get_filter_inputs(page)
+        # 2. Force set values into the correct top input fields using Vue native setters
+        await page.evaluate(r"""
+            ({minV, maxV}) => {
+                let inputs = Array.from(document.querySelectorAll('input')).filter(i => {
+                    let r = i.getBoundingClientRect();
+                    return r.width > 15 && r.height > 10 && r.top < 300;
+                });
+                if (inputs.length >= 2) {
+                    let nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    
+                    nativeSetter.call(inputs[0], minV);
+                    inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+                    inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
+                    
+                    nativeSetter.call(inputs[1], maxV);
+                    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+                    inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }
+        """, {"minV": min_s, "maxV": max_s})
 
-            if len(vis) < 2:
-                await tap_point(page, 62, 125)
-                await asyncio.sleep(0.6)
-                continue
+        await asyncio.sleep(0.3)
 
-            min_inp, max_inp = vis[0][2], vis[1][2]
-            max_bb = vis[1][3]
+        # 3. Click the 🔍 search icon button precisely
+        search_icon = await page.evaluate(r"""
+            () => {
+                let best = null;
+                for (let e of document.querySelectorAll('svg, i, img, span, div, a')) {
+                    let r = e.getBoundingClientRect();
+                    if (r.width < 12 || r.width > 60 || r.height < 12 || r.height > 60) continue;
+                    if (r.top > 250 || r.left < 200) continue;
+                    if (!best || r.left > best.left) best = r;
+                }
+                return best ? {x: best.left + best.width / 2, y: best.top + best.height / 2} : {x: 358, y: 125};
+            }
+        """)
+        if search_icon:
+            await tap_point(page, search_icon["x"], search_icon["y"])
+        else:
+            await tap_point(page, 358, 125)
 
-            for inp, val in ((min_inp, min_s), (max_inp, max_s)):
-                try:
-                    await inp.click()
-                    await inp.fill("")
-                    await inp.fill(val)
-                except Exception:
-                    await inp.click(click_count=3)
-                    await page.keyboard.press("Control+A")
-                    await page.keyboard.press("Backspace")
-                    await page.keyboard.type(val, delay=30)
-                await inp.evaluate(
-                    "e => { e.dispatchEvent(new Event('input',{bubbles:true})); "
-                    "e.dispatchEvent(new Event('change',{bubbles:true})); "
-                    "e.dispatchEvent(new KeyboardEvent('keyup',{bubbles:true})); }"
-                )
-                await asyncio.sleep(0.2)
-
-            try:
-                await max_inp.evaluate("e => e.blur()")
-            except Exception:
-                pass
-            await asyncio.sleep(0.3)
-
-            # --- DEBUG: search dabaane se PEHLE ka state ---
-            if debug_ctx and attempt == 0:
-                ctx, chat_id = debug_ctx
-                try:
-                    pre_vals = await read_filter_values(page)
-                    shot_pre = await page.screenshot()
-                    await ctx.bot.send_photo(
-                        chat_id=chat_id, photo=shot_pre,
-                        caption=f"🔧 DEBUG: Search se PEHLE input values = {pre_vals}"
-                    )
-                    html_pre = await get_filter_area_html(page)
-                    await ctx.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"🔧 DEBUG HTML (search se pehle):\n<pre>{html_pre[:3500]}</pre>",
-                        parse_mode="HTML"
-                    )
-                except Exception as e:
-                    try:
-                        await ctx.bot.send_message(chat_id=chat_id, text=f"Debug send error: {e}")
-                    except Exception:
-                        pass
-
-            await click_search_icon(page, max_bb, max_inp)
-            await asyncio.sleep(1.0 if attempt == 0 else 0.6)
-
-            got = await read_filter_values(page)
-
-            # --- DEBUG: search dabaane ke BAAD ka state ---
-            if debug_ctx and attempt == 0:
-                ctx, chat_id = debug_ctx
-                try:
-                    shot_post = await page.screenshot()
-                    await ctx.bot.send_photo(
-                        chat_id=chat_id, photo=shot_post,
-                        caption=f"🔧 DEBUG: Search ke BAAD input values = {got}"
-                    )
-                except Exception:
-                    pass
-
-            if len(got) >= 2 and got[0] == min_s and got[1] == max_s:
-                return True
-        return False
-    except Exception:
-        return False
-
-
-async def refresh_filter(page, min_val: float, max_val: float):
-    """Values sahi hain to sirf search icon dabao (fast refresh), warna dobara set karo"""
-    min_s, max_s = str(int(min_val)), str(int(max_val))
-    try:
-        got = await read_filter_values(page)
-        if len(got) >= 2 and got[0] == min_s and got[1] == max_s:
-            vis = await get_filter_inputs(page)
-            if len(vis) >= 2:
-                await click_search_icon(page, vis[1][3], vis[1][2])
-                await asyncio.sleep(0.4)
-                return True
-        return await set_custom_price_filter(page, min_val, max_val)
+        await asyncio.sleep(0.8)
+        return True
     except Exception:
         return False
 
@@ -525,34 +430,24 @@ async def click_wallet_option(page, pay_mode: str):
     return False
 
 
-# ---------------------------------------------------------------
-# STAY / FAILURE DETECTION
-# "Tips" sirf heading hai, success popup me bhi aata hai
-# ("pre-order is successful"). Sirf asli failure phrases detect karo.
-# ---------------------------------------------------------------
-STAY_JS = r"""
-    () => {
-        let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-        let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-        if (stayBtn) {
-            stayBtn.click();
-            let r = stayBtn.getBoundingClientRect();
-            return {x: r.left, y: r.top, width: r.width, height: r.height};
-        }
-        return null;
-    }
-"""
-
-# In exact phrases ke sath hi order kisi aur ne grab kiya maana jaye
 STAY_TRIGGER_TEXTS = ["Failed to pick up order", "Please slow down"]
 
 
 async def dismiss_stay_if_present(page):
-    """Agar 'order kisi aur ne grab kar liya' wala real failure popup dikhe to dismiss karo.
-       'pre-order is successful' wale Tips ko yahan se touch nahi karte."""
     body_txt = await page.evaluate("() => document.body.innerText")
     if any(t in body_txt for t in STAY_TRIGGER_TEXTS):
-        s_box = await page.evaluate(STAY_JS)
+        s_box = await page.evaluate(r"""
+            () => {
+                let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+                let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                if (stayBtn) {
+                    stayBtn.click();
+                    let r = stayBtn.getBoundingClientRect();
+                    return {x: r.left, y: r.top, width: r.width, height: r.height};
+                }
+                return null;
+            }
+        """)
         if s_box:
             await tap_element_center(page, s_box)
         return True
@@ -560,7 +455,6 @@ async def dismiss_stay_if_present(page):
 
 
 async def click_ok_if_success_tips(page):
-    """'pre-order is successful' Tips popup aaye to OK dabao"""
     body_txt = await page.evaluate("() => document.body.innerText")
     if "pre-order is successful" in body_txt.lower() or "successful" in body_txt.lower():
         ok_box = await page.evaluate(r"""
@@ -611,8 +505,6 @@ async def get_matching_orders(page, min_val, max_val):
 
 
 async def click_order_by_index(page, idx):
-    """JS .click() seedha button element par - floating icons (support bubble waghera)
-       ke upar baithe hone se bhi click sahi jagah hi jaata hai (coordinate-tap nahi)"""
     result = await page.evaluate(r"""
         (i) => {
             let items = document.querySelectorAll('div.buyitem');
@@ -627,29 +519,18 @@ async def click_order_by_index(page, idx):
         }
     """, idx)
     if result and result["y"] > 0 and result["y"] < 840:
-        # Redundancy ke liye coordinate tap bhi, par JS click() upar already ho chuka hai
         await tap_element_center(page, result)
         return True
     return bool(result)
 
 
 async def is_wrong_page(page):
-    """Kabhi kabhi galat jagah (jaise Customer Service page) khul jaata hai -
-       usse detect karke wapas jao"""
     body_txt = await page.evaluate("() => document.body.innerText")
     if "Customer Service" in body_txt and "Buy" not in body_txt:
         try:
             await page.go_back(wait_until="domcontentloaded", timeout=8000)
         except Exception:
-            back_box = await page.evaluate(r"""
-                () => {
-                    let el = document.querySelector('.van-nav-bar__left, .van-icon-arrow-left');
-                    if (el) { let r = el.getBoundingClientRect(); el.click(); return {x:r.left,y:r.top,width:r.width,height:r.height}; }
-                    return null;
-                }
-            """)
-            if back_box:
-                await tap_element_center(page, back_box)
+            pass
         await asyncio.sleep(1.0)
         return True
     return False
@@ -681,7 +562,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
         async with async_playwright() as p:
             browser = await p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+                args=[
+                    "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--disable-background-timer-throttling",
+                    "--disable-background-networking",
+                    "--disable-ipc-flooding-protection",
+                ]
             )
             browser_context = await browser.new_context(
                 viewport={"width": 390, "height": 844},
@@ -689,6 +577,15 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 has_touch=True,
                 is_mobile=True
             )
+            await browser_context.add_init_script(r"""
+                Object.defineProperty(document, 'visibilityState', { get: () => 'visible' });
+                Object.defineProperty(document, 'hidden', { get: () => false });
+                document.hasFocus = () => true;
+                window.addEventListener('blur', e => e.stopImmediatePropagation(), true);
+                ['visibilitychange', 'blur', 'pagehide'].forEach(evt => {
+                    document.addEventListener(evt, e => e.stopImmediatePropagation(), true);
+                });
+            """)
             page = await browser_context.new_page()
 
             if session_data:
@@ -699,17 +596,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Site ke Min/Max box me koi real <input> hai hi nahi (confirmed), isliye
-            # usse set karne ki koshish nahi karte - bot khud JS se har order ka price
-            # padh ke range match karta hai (get_matching_orders), jo already kaam kar raha hai.
+            # Set initial Min-Max filter and click search icon
+            await set_custom_price_filter(page, min_val, max_val)
+            await asyncio.sleep(1.2)
+
             try:
                 init_shot = await page.screenshot()
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
                     caption=(
-                        f"✅ **Scanning Shuru (Min: {int(min_val)}, Max: {int(max_val)})**\n"
-                        f"Apna range filter bot khud JS se match karta hai, site ke filter box pe depend nahi."
+                        f"✅ **Min-Max Filter Applied (Min: {int(min_val)}, Max: {int(max_val)})**\n"
+                        f"Scanning orders..."
                     ),
                     parse_mode="Markdown"
                 )
@@ -784,9 +682,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(1.5)
                     continue
 
-                # -------------------------------------------------
-                # Sabhi matching orders ki list lo, ek-ek karke try karo
-                # -------------------------------------------------
                 scan_data = await get_matching_orders(page, min_val, max_val)
                 matched_list = scan_data.get("matched", [])
                 visible_prices = scan_data.get("prices", [])
@@ -821,14 +716,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     await asyncio.sleep(1.5)
 
-                    # Galti se Customer Service / kisi aur page pe chale gaye to wapas aao
                     if await is_wrong_page(page):
                         retry_count += 1
                         await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
                         await asyncio.sleep(1.5)
                         continue
 
-                    # real failure (kisi aur ne grab kiya) hi dismiss karo
                     if await dismiss_stay_if_present(page):
                         retry_count += 1
                         await asyncio.sleep(1.2)
@@ -848,7 +741,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await click_wallet_option(page, pay_mode)
                     await asyncio.sleep(3.0)
 
-                    # yahan "pre-order is successful" wala Tips aa sakta hai -> OK dabao
                     await click_ok_if_success_tips(page)
                     await asyncio.sleep(0.5)
 
@@ -873,7 +765,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         body_txt2 = await page.evaluate("() => document.body.innerText")
 
                         if any(t in body_txt2 for t in STAY_TRIGGER_TEXTS):
-                            s_box = await page.evaluate(STAY_JS)
+                            s_box = await page.evaluate(r"""
+                                () => {
+                                    let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+                                    let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                                    if (stayBtn) {
+                                        stayBtn.click();
+                                        let r = stayBtn.getBoundingClientRect();
+                                        return {x: r.left, y: r.top, width: r.width, height: r.height};
+                                    }
+                                    return null;
+                                }
+                            """)
                             if s_box:
                                 await tap_element_center(page, s_box)
                             step_result = "failed_retry"
@@ -921,7 +824,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         b_text2 = await page.evaluate("() => document.body.innerText")
 
                         if any(t in b_text2 for t in STAY_TRIGGER_TEXTS):
-                            s_box = await page.evaluate(STAY_JS)
+                            s_box = await page.evaluate(r"""
+                                () => {
+                                    let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+                                    let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+                                    if (stayBtn) {
+                                        stayBtn.click();
+                                        let r = stayBtn.getBoundingClientRect();
+                                        return {x: r.left, y: r.top, width: r.width, height: r.height};
+                                    }
+                                    return null;
+                                }
+                            """)
                             if s_box:
                                 await tap_element_center(page, s_box)
                             bank_loaded = False
@@ -938,7 +852,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         await asyncio.sleep(1.0)
                         continue
 
-                    # ✅ Bank details aa gayi -> order confirmed, bot yahin stop karega
                     order_success = True
                     break
 
@@ -969,7 +882,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active (Forced Min-Max)**\n"
+                                f"🚀 **Auto-Buy Active (Fixed Min-Max)**\n"
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans:** `{scan_count}` | **Retries:** `{retry_count}`\n"
@@ -981,7 +894,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                await asyncio.sleep(0.5)
+                # Fast refresh using Min-Max filter and 🔍 icon
+                await set_custom_price_filter(page, min_val, max_val)
+                await asyncio.sleep(1.0)
 
             await browser.close()
     except Exception as e:
