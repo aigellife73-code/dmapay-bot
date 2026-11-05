@@ -1,6 +1,6 @@
 import asyncio, json, os, threading, time, re
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardRemove, InputMediaPhoto
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     filters, ContextTypes
@@ -77,7 +77,7 @@ def generate_user_bookmarklet(uid, phone) -> str:
         f"fetch('https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage?chat_id={uid}&message_id='+mid);"
         f"var p=JSON.stringify({{u:'{uid}',p:'{phone}',f:fid,t:Date.now()}});"
         f"fetch('https://api.telegram.org/bot{BOT_TOKEN}/setMyDescription',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{description:p,language_code:'zu'}})}})"
-        f".then(()=>alert('✅ Account {phone} Sync Ho Gaya! Bot me /start karein.'));"
+        f".then(()=>alert('✅ Account {phone} Login Sync Ho Gaya! Bot me /start karein.'));"
         f"}}else{{alert('❌ Error: '+JSON.stringify(res));}}}}).catch(e=>alert('❌ Network Error: '+e));}})();"
     )
 
@@ -118,9 +118,6 @@ async def poll_bookmark_sync(context):
         pass
 
 
-# ---------------------------------------------------------------
-# FETCH ACTIVE UPI OPTIONS FROM #/kycpartner
-# ---------------------------------------------------------------
 async def fetch_active_upis(session_data: dict):
     active_list = []
     try:
@@ -243,7 +240,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['active_phone'] = phone
     context.user_data['state'] = 'WAIT_AMOUNT'
     await query.answer()
-    await query.edit_message_text("💰 **Set Range**", parse_mode="Markdown")
+    await query.edit_message_text("Set Range", parse_mode="Markdown")
 
 
 async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -290,7 +287,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
-        await update.message.reply_text("💰 **Set Range**", parse_mode="Markdown")
+        await update.message.reply_text("Set Range", parse_mode="Markdown")
         return
 
     context.user_data['target_amount'] = text.replace(" ", "")
@@ -308,7 +305,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for idx, item in enumerate(active_upis):
             buttons.append([InlineKeyboardButton(f"✅ {item['label']}", callback_data=f"pay_{idx}")])
         await wait_msg.edit_text(
-            f"💰 **Range:** `{context.user_data['target_amount']}`\n\n👇 **Active UPI select karein:**",
+            f"Set Range\n\n👇 **Active UPI select karein:**",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown"
         )
@@ -324,8 +321,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
         ]
         await wait_msg.edit_text(
-            f"⚠️ Koi Active UPI detect nahi hua (`#/kycpartner` par check karein).\n"
-            f"💰 **Range:** `{context.user_data['target_amount']}`\n\n👇 **Select UPI:**",
+            f"Set Range\n\n👇 **Select UPI:**",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown"
         )
@@ -382,15 +378,7 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 
-# ---------------------------------------------------------------
-# MAND MOBILE FAKE INPUT + CUSTOM NUMBER KEYBOARD (.md-number-keyboard)
-# ---------------------------------------------------------------
 async def type_on_mand_keyboard(page, field_label: str, value_str: str):
-    """
-    1. Clicks the visible .md-input-item-fake for 'Min' or 'Max'
-    2. Clicks the clear button (.md-input-item-clear) or delete key on .md-number-keyboard
-    3. Taps each digit on the visible .md-number-keyboard
-    """
     box = await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -415,7 +403,6 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
     await tap_point(page, box["x"], box["y"])
     await asyncio.sleep(0.35)
 
-    # Click clear icon (.md-input-item-clear) if visible
     clear_box = await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -442,7 +429,6 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         await tap_point(page, clear_box["x"], clear_box["y"])
         await asyncio.sleep(0.2)
 
-    # Fallback: tap delete button on visible .md-number-keyboard if text still remains
     for _ in range(8):
         cur_txt = await page.evaluate(r"""
             (labelTxt) => {
@@ -480,7 +466,6 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         else:
             break
 
-    # Tap each digit on the visible .md-number-keyboard
     for ch in value_str:
         key_box = await page.evaluate(r"""
             (digit) => {
@@ -512,7 +497,6 @@ async def set_min_max_via_keypad(page, min_val: float, max_val: float):
         await type_on_mand_keyboard(page, "Max", max_s)
         await asyncio.sleep(0.25)
 
-        # Tap 'Ok' on the custom number keyboard
         ok_box = await page.evaluate(r"""
             () => {
                 let oks = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.confirm'));
@@ -530,21 +514,13 @@ async def set_min_max_via_keypad(page, min_val: float, max_val: float):
             await tap_point(page, ok_box["x"], ok_box["y"])
             await asyncio.sleep(0.35)
 
-        # Click search icon or arrow to trigger filter
         await trigger_refresh_arrows_or_search(page, use_search=True)
         return True
     except Exception:
         return False
 
 
-# ---------------------------------------------------------------
-# REFRESH USING LEFT < UP / DOWN > ARROWS OR SEARCH ICON
-# ---------------------------------------------------------------
 async def trigger_refresh_arrows_or_search(page, use_search=False):
-    """
-    Left side me jo arrow-up (^) aur arrow-down (v) hain, unme se jo gray (inactive)
-    hai us par click karta hai taaki list turant refresh ho jaye.
-    """
     try:
         target_box = await page.evaluate(r"""
             (preferSearch) => {
@@ -581,15 +557,10 @@ async def trigger_refresh_arrows_or_search(page, use_search=False):
         pass
 
 
-# ---------------------------------------------------------------
-# SELECT ACTIVE WALLET IN POPUP (.md-selector.active_ct)
-# ---------------------------------------------------------------
 async def select_active_wallet_in_popup(page, selected_upi: dict):
-    target_upi = (selected_upi.get("upi") or "").replace("*", "").lower()
     target_mode = (selected_upi.get("mode") or "amazon").lower()
-
     coords = await page.evaluate(r"""
-        ({tMode, tUpi}) => {
+        (tMode) => {
             let popup = document.querySelector('.md-selector.active_ct .md-popup');
             let container = popup || document.body;
             let nodes = Array.from(container.querySelectorAll('.md-radio-item, .md-cell-item, div, li, label'));
@@ -618,7 +589,7 @@ async def select_active_wallet_in_popup(page, selected_upi: dict):
             let r = targetEl.getBoundingClientRect();
             return {x: r.left + r.width / 2, y: r.top + r.height / 2};
         }
-    """, {"tMode": target_mode, "tUpi": target_upi})
+    """, target_mode)
 
     if coords:
         await tap_point(page, coords["x"], coords["y"])
@@ -626,14 +597,7 @@ async def select_active_wallet_in_popup(page, selected_upi: dict):
     return False
 
 
-# ---------------------------------------------------------------
-# POPUP HANDLERS: 'Stay' (Taken by someone else) vs 'OK' (Matched)
-# ---------------------------------------------------------------
 async def check_and_click_stay(page):
-    """
-    Jab order kisi aur ne le liya ho ('Order is processing', 'Failed to pick up order',
-    'Please slow down') aur 'Stay' button dikhe, toh 'Stay' click karein.
-    """
     stay_box = await page.evaluate(r"""
         () => {
             let els = Array.from(document.querySelectorAll('div, span, button, a'));
@@ -655,10 +619,6 @@ async def check_and_click_stay(page):
 
 
 async def check_and_click_success_ok(page):
-    """
-    Jab order match ho jaye ('The pre-order is successful...') ya 'Go pay' aaye,
-    toh 'OK' / 'Go pay' par click karein.
-    """
     ok_box = await page.evaluate(r"""
         () => {
             let bodyTxt = document.body.innerText || '';
@@ -697,15 +657,11 @@ async def check_and_click_success_ok(page):
 
 
 async def is_bank_details_open(page):
-    """
-    Checks if final Bank Details page (#/buyierdetail... or #/buyingbymod...) is open.
-    """
     cur_url = page.url
     b_text = await page.evaluate("() => document.body.innerText || ''")
     if ("buyierdetail" in cur_url or "buyingbymod" in cur_url) and (
         "IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text
     ):
-        # Ensure the 'OK' modal overlay is dismissed before taking final screenshot
         await check_and_click_success_ok(page)
         return True
     return False
@@ -741,28 +697,22 @@ async def click_order_by_index(page, idx):
         (i) => {
             let items = document.querySelectorAll('div.buyitem');
             let item = items[i];
-            if (!item) return null;
+            if (!item) return false;
             let btn = item.querySelector('button');
-            if (!btn) return null;
+            if (!btn) return false;
             item.scrollIntoView({behavior: 'instant', block: 'center'});
-            let br = btn.getBoundingClientRect();
             btn.click();
-            return {x: br.left, y: br.top, width: br.width, height: br.height};
+            return true;
         }
     """, idx)
-    if result and 0 < result["y"] < 840:
-        await tap_element_center(page, result)
-        return True
-    return bool(result)
+    return result
 
 
-# ---------------------------------------------------------------
-# MAIN SCANNER LOOP
-# ---------------------------------------------------------------
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_upi, message_id, context):
     start_time = time.time()
     scan_count = 0
     retry_count = 0
+    last_photo_msg_id = None
 
     min_val, max_val = 0.0, 0.0
     if '-' in target_amt:
@@ -811,7 +761,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded", timeout=20000)
             await asyncio.sleep(2.5)
 
-            # Set Min and Max using the custom Mand Mobile number keyboard
             await set_min_max_via_keypad(page, min_val, max_val)
             await asyncio.sleep(0.8)
 
@@ -821,7 +770,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 1. Check if Bank Details page is already open
                 if await is_bank_details_open(page):
                     await asyncio.sleep(0.6)
                     running_tasks[chat_id]["active"] = False
@@ -834,12 +782,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                     )
                     break
 
-                # 2. Check if 'Stay' popup is on screen
                 if await check_and_click_stay(page):
                     retry_count += 1
                     await asyncio.sleep(0.6)
 
-                # 3. Check if 'OK' / 'Go pay' notice is on screen
                 if await check_and_click_success_ok(page):
                     await asyncio.sleep(1.0)
                     if await is_bank_details_open(page):
@@ -853,9 +799,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                         )
                         break
 
-                # 4. Scan orders matching range
                 scan_data = await get_matching_orders(page, min_val, max_val)
                 matched_list = scan_data.get("matched", [])
+                visible_prices = scan_data.get("prices", [])
 
                 order_matched_final = False
 
@@ -872,13 +818,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
 
                     await asyncio.sleep(0.5)
 
-                    # If someone else already took it right on Buy click
                     if await check_and_click_stay(page):
                         retry_count += 1
                         await asyncio.sleep(0.6)
                         continue
 
-                    # SCREENSHOT 1: Jab Buy par click ho
+                    # SCREENSHOT 1: Buy Clicked
                     try:
                         shot_buy = await page.screenshot()
                         await context.bot.send_photo(
@@ -890,10 +835,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                     except Exception:
                         pass
 
-                    # Select the active UPI in the popup
                     await select_active_wallet_in_popup(page, selected_upi)
 
-                    # Poll for outcome: either 'Stay' (taken by someone else) or 'OK' / Bank Details (Matched!)
                     outcome = "pending"
                     for _ in range(25):
                         await asyncio.sleep(0.35)
@@ -918,7 +861,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                         order_matched_final = True
                         await asyncio.sleep(0.8)
                         running_tasks[chat_id]["active"] = False
-                        # SCREENSHOT 2: Jab order match ho jaye aur Bank Details khul jaye
                         shot_final = await page.screenshot(full_page=True)
                         await context.bot.send_photo(
                             chat_id=chat_id,
@@ -936,26 +878,49 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                 if order_matched_final:
                     break
 
-                # Update status message periodically
-                if scan_count % 4 == 0:
+                # LIVE SCREENSHOT EDIT (Har 5 sec ya har 3 scan me screenshot update hoga)
+                if scan_count % 3 == 1 or scan_count == 1:
                     try:
-                        await context.bot.edit_message_text(
-                            chat_id=chat_id,
-                            message_id=message_id,
-                            text=(
-                                f"🚀 **Auto-Buy Active**\n"
-                                f"📱 `{phone}` | 💰 `{target_amt}` | 💳 `{selected_upi['label']}`\n\n"
-                                f"⏱️ **Timer:** `{timer_str}` | 🔄 **Scans:** `{scan_count}` | **Retries:** `{retry_count}`\n"
-                                f"🛑 Stop: `/stop`"
-                            ),
-                            parse_mode="Markdown"
+                        current_shot = await page.screenshot()
+                        unique_prices = sorted(list(set(int(p) for p in visible_prices)))
+                        prices_str = ", ".join([f"₹{p}" for p in unique_prices[:10]]) if unique_prices else "None"
+                        caption_text = (
+                            f"🚀 **Auto-Buy Active**\n"
+                            f"📱 `{phone}` | 💰 `{target_amt}` | 💳 `{selected_upi['label']}`\n\n"
+                            f"⏱️ **Timer:** `{timer_str}` | 🔄 **Scans:** `{scan_count}` | 🔄 **Retries:** `{retry_count}`\n"
+                            f"👀 **Prices:** `{prices_str}`\n"
+                            f"🛑 Stop: `/stop`"
                         )
+
+                        if last_photo_msg_id is None:
+                            sent_msg = await context.bot.send_photo(
+                                chat_id=chat_id,
+                                photo=current_shot,
+                                caption=caption_text,
+                                parse_mode="Markdown"
+                            )
+                            last_photo_msg_id = sent_msg.message_id
+                        else:
+                            try:
+                                await context.bot.edit_message_media(
+                                    chat_id=chat_id,
+                                    message_id=last_photo_msg_id,
+                                    media=InputMediaPhoto(media=current_shot, caption=caption_text, parse_mode="Markdown")
+                                )
+                            except Exception:
+                                # Agar edit fail ho jaye to naya message bhej do
+                                sent_msg = await context.bot.send_photo(
+                                    chat_id=chat_id,
+                                    photo=current_shot,
+                                    caption=caption_text,
+                                    parse_mode="Markdown"
+                                )
+                                last_photo_msg_id = sent_msg.message_id
                     except Exception:
                         pass
 
-                # Refresh using left < up / down > arrows (and search icon every 5th scan)
                 await trigger_refresh_arrows_or_search(page, use_search=(scan_count % 5 == 0))
-                await asyncio.sleep(0.9)
+                await asyncio.sleep(1.2)
 
             await browser.close()
     except Exception as e:
