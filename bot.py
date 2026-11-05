@@ -149,7 +149,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         f"📱 **Account: `{phone}`**\n\n"
-        f"Ab **Target Amount ya Range** bhejein (jaise `2000`, `1000` ya `500-900`):",
+        f"Ab **Target Amount ya Range** bhejein (jaise `2000` ya `500-900`):",
         parse_mode="Markdown"
     )
 
@@ -203,7 +203,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['target_amount'] = text.replace(" ", "")
     context.user_data['state'] = ''
     
-    # KUN 2 KNAPPER: Mobikwik og Amazon (3. mulighed er fjernet som ønsket)
+    # Sirf 2 Payment Options: Mobikwik aur Amazon
     buttons = [
         [
             InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"),
@@ -229,10 +229,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
     
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Active ('All' Tab + Full DOM Scan)**\n"
-        f"📱 `{phone}` | 💰 Target: `₹{target_amt}` | 💳 {pay_mode}\n\n"
+        f"🚀 **Auto-Buy Active (Min-Max Filter)**\n"
+        f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Selecting visible 'All' tab & scanning all orders...\n\n"
+        f"🔍 **Status:** Setting Min-Max range & scanning...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -259,75 +259,45 @@ async def tap_element_center(page, box):
     cy = box["y"] + box["height"] / 2
     await tap_point(page, cx, cy)
 
-async def select_visible_all_tab(page):
-    """
-    Finder og klikker specifikt på den synlige 'All' chip (span.amt-range-item med rect.left > 0)
-    og klikker også på forstørrelsesglasset (🔍) hvis det er synligt.
-    """
+async def set_custom_price_filter(page, min_val: float, max_val: float):
+    """Kholta hai filter drawer aur Min/Max inputs me value bharkar 🔍 icon par click karta hai"""
     try:
-        # 1. Åbn filter-skuffen hvis 'All' chippen ikke er synlig (height == 0)
-        is_visible = await page.evaluate(r"""
+        # 1. Click arrow to open filter drawer if inputs aren't visible
+        arrow_box = await page.evaluate(r"""
             () => {
-                let chips = Array.from(document.querySelectorAll('span.amt-range-item'));
-                return chips.some(c => c.getBoundingClientRect().left > 0 && c.getBoundingClientRect().height > 5);
-            }
-        """)
-        if not is_visible:
-            # Klik på pilen til venstre for 'Min' (x: 65, y: 122-170)
-            arrow_pos = await page.evaluate(r"""
-                () => {
-                    let allEls = Array.from(document.querySelectorAll('div, span, i, svg'));
-                    let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min');
-                    if (minEl) {
-                        let r = minEl.getBoundingClientRect();
-                        return {x: Math.max(20, r.left - 25), y: r.top + r.height / 2};
-                    }
-                    return {x: 62, y: 125};
-                }
-            """)
-            if arrow_pos:
-                await tap_point(page, arrow_pos["x"], arrow_pos["y"])
-                await asyncio.sleep(0.4)
-
-        # 2. Find den SYNLIGE 'All' chip (rect.left > 0) på den aktive UPI-fane
-        chip_box = await page.evaluate(r"""
-            () => {
-                let chips = Array.from(document.querySelectorAll('span.amt-range-item'));
-                for (let c of chips) {
-                    let t = (c.innerText || '').trim();
-                    let r = c.getBoundingClientRect();
-                    if (t === 'All' && r.left > 0 && r.width > 10 && r.height > 10) {
-                        c.click();
-                        return {x: r.left, y: r.top, width: r.width, height: r.height};
-                    }
-                }
-                return null;
-            }
-        """)
-        if chip_box:
-            await tap_element_center(page, chip_box)
-            await asyncio.sleep(0.4)
-    except Exception:
-        pass
-
-async def click_magnify_or_refresh(page):
-    """Klikker på 🔍 knappen eller den synlige 'All' chip for at opdatere listen"""
-    try:
-        mag_box = await page.evaluate(r"""
-            () => {
-                let allEls = Array.from(document.querySelectorAll('div, span, i, svg, img'));
-                let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min' && e.getBoundingClientRect().left > 0);
+                let allEls = Array.from(document.querySelectorAll('div, span, i, svg'));
+                let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min');
                 if (minEl) {
                     let r = minEl.getBoundingClientRect();
-                    return {x: 358, y: r.top + r.height / 2};
+                    return {x: Math.max(20, r.left - 25), y: r.top + r.height / 2};
                 }
-                return null;
+                return {x: 62, y: 125};
             }
         """)
-        if mag_box:
-            await tap_point(page, mag_box["x"], mag_box["y"])
-            await asyncio.sleep(0.3)
-        await select_visible_all_tab(page)
+        if arrow_box:
+            await tap_point(page, arrow_box["x"], arrow_box["y"])
+            await asyncio.sleep(0.4)
+
+        # 2. Fill Min and Max input boxes accurately
+        await page.evaluate(r"""
+            ({minV, maxV}) => {
+                let inputs = document.querySelectorAll('input');
+                if (inputs.length >= 2) {
+                    inputs[0].value = minV;
+                    inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
+                    inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
+                    
+                    inputs[1].value = maxV;
+                    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
+                    inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
+                }
+            }
+        """, {"minV": int(min_val), "maxV": int(max_val)})
+
+        await asyncio.sleep(0.3)
+        # 3. Click 🔍 search icon button
+        await tap_point(page, 358, 125)
+        await asyncio.sleep(0.8)
     except Exception:
         pass
 
@@ -441,16 +411,16 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Klik på den synlige 'All' chip
-            await select_visible_all_tab(page)
-            await asyncio.sleep(1.0)
+            # Set initial Min-Max filter
+            await set_custom_price_filter(page, min_val, max_val)
+            await asyncio.sleep(1.2)
 
             try:
                 init_shot = await page.screenshot()
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
-                    caption=f"✅ **Visible 'All' Tab Selected!**\nScanning all `div.buyitem` cards (including hidden ones below screen) for: `₹{target_amt}`",
+                    caption=f"✅ **Min-Max Filter Applied (Min: {int(min_val)}, Max: {int(max_val)})!**\nScanning orders...",
                     parse_mode="Markdown"
                 )
             except Exception:
@@ -462,7 +432,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Tjek om Bank Details siden (#/buyingbymod) er åben
+                # 0. Check Bank Details Page (#/buyingbymod)
                 cur_url = page.url
                 b_text = await page.evaluate("() => document.body.innerText")
                 if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
@@ -474,14 +444,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         photo=shot,
                         caption=(
                             f"🎉 **Bank Details Aa Gayi! Order Matched & Stopped!**\n"
-                            f"💰 **Target:** `₹{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
+                            f"💰 **Target:** `{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
                         parse_mode="Markdown"
                     )
                     break
 
-                # 1. Tjek Notify Popup ("need to pay!" -> Go pay)
+                # 1. Check Notify Popup ("need to pay!" -> Go pay)
                 notify_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -514,14 +484,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         photo=shot,
                         caption=(
                             f"🎉 **Order Matched & Bank Details Opened!**\n"
-                            f"💰 **Target:** `₹{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
+                            f"💰 **Target:** `{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
                         parse_mode="Markdown"
                     )
                     break
 
-                # 2. Håndter 'Please slow down' / 'Failed to pick up order' -> Klik 'Stay'
+                # 2. Handle 'Please slow down' / 'Failed to pick up order' -> Click 'Stay'
                 stay_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -545,10 +515,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(1.0)
                     continue
 
-                # 3. Sikr at 'All' chippen stadig har 'active' class
-                await select_visible_all_tab(page)
-
-                # 4. SCAN ALLE div.buyitem KORT I HELE DOM'EN (Også dem der ligger skjult langt nede i div.md-scroll-view!)
+                # 3. Scan all `div.buyitem` cards in DOM matching min-max range
                 scan_result = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let allPrices = [];
@@ -556,7 +523,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         
                         for (let item of items) {
                             let rItem = item.getBoundingClientRect();
-                            // Ignorer kort der ligger på inaktive/skjulte swiper-faner (x < 0 eller width == 0)
                             if (rItem.width === 0 || rItem.left < 0 || rItem.left >= window.innerWidth) continue;
                             
                             let cText = item.innerText || '';
@@ -568,7 +534,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                 if (val >= minV && val <= maxV) {
                                     let btn = item.querySelector('button');
                                     if (btn) {
-                                        // Scroll kortet ind i midten af skærmen og klik direkte!
                                         item.scrollIntoView({behavior: 'instant', block: 'center'});
                                         btn.click();
                                         let br = btn.getBoundingClientRect();
@@ -576,14 +541,13 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                                             found: true,
                                             amount: val,
                                             box: {x: br.left, y: br.top, width: br.width, height: br.height},
-                                            prices: allPrices,
-                                            totalCards: items.length
+                                            prices: allPrices
                                         };
                                     }
                                 }
                             }
                         }
-                        return {found: false, prices: allPrices, totalCards: items.length};
+                        return {found: false, prices: allPrices};
                     }
                 """, {"minV": min_val, "maxV": max_val})
 
@@ -623,7 +587,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     await click_wallet_option(page, pay_mode)
                     
-                    # Vent 3 sekunder på at bankoplysninger indlæses
+                    # Exact 3 seconds wait for bank details to load
                     await asyncio.sleep(3.0)
 
                     try:
@@ -692,7 +656,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     if step_result == "failed_retry":
                         retry_count += 1
                         await asyncio.sleep(1.2)
-                        await click_magnify_or_refresh(page)
+                        await set_custom_price_filter(page, min_val, max_val)
                         await asyncio.sleep(1.0)
                         continue
 
@@ -747,8 +711,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # Vis unikke priser fra hele listen (både top og bund) i statusbeskeden
-                if scan_count % 2 == 0:
+                if scan_count % 3 == 0:
                     unique_prices = sorted(list(set(int(p) for p in visible_prices)))
                     prices_str = ", ".join([f"₹{p}" for p in unique_prices[:10]]) if unique_prices else "None"
                     try:
@@ -756,12 +719,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active ('All' Tab + Full List Scan)**\n"
-                                f"📱 `{phone}` | 💰 Target: `₹{target_amt}` | 💳 {pay_mode}\n\n"
+                                f"🚀 **Auto-Buy Active (Min-Max Filter)**\n"
+                                f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans:** `{scan_count}` | **Retries:** `{retry_count}`\n"
-                                f"📦 **Total Orders Scanned:** `{len(visible_prices)}`\n"
-                                f"👀 **Available Prices:** `{prices_str}`\n\n"
+                                f"👀 **Screen Prices:** `{prices_str}`\n\n"
                                 f"🛑 Rokne ke liye `/stop` bhejein."
                             ),
                             parse_mode="Markdown"
@@ -769,8 +731,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Opdater listen ved at klikke på 🔍 / 'All'
-                await click_magnify_or_refresh(page)
+                # Refresh list using Min-Max filter and 🔍 icon
+                await set_custom_price_filter(page, min_val, max_val)
                 await asyncio.sleep(1.2)
 
             await browser.close()
