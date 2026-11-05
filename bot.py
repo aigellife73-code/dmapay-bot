@@ -203,7 +203,6 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['target_amount'] = text.replace(" ", "")
     context.user_data['state'] = ''
     
-    # Sirf 2 Payment Options: Mobikwik aur Amazon
     buttons = [
         [
             InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"),
@@ -229,10 +228,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
     
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Active (Min-Max Filter)**\n"
+        f"🚀 **Auto-Buy Active (Native Min-Max)**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Setting Min-Max range & scanning...\n\n"
+        f"🔍 **Status:** Forcing Min-Max filter range...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -260,9 +259,8 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 async def set_custom_price_filter(page, min_val: float, max_val: float):
-    """Kholta hai filter drawer aur Min/Max inputs me value bharkar 🔍 icon par click karta hai"""
+    """Native setter ka use karke Vue.js inputs me force value set karta hai"""
     try:
-        # 1. Click arrow to open filter drawer if inputs aren't visible
         arrow_box = await page.evaluate(r"""
             () => {
                 let allEls = Array.from(document.querySelectorAll('div, span, i, svg'));
@@ -278,24 +276,24 @@ async def set_custom_price_filter(page, min_val: float, max_val: float):
             await tap_point(page, arrow_box["x"], arrow_box["y"])
             await asyncio.sleep(0.4)
 
-        # 2. Fill Min and Max input boxes accurately
         await page.evaluate(r"""
             ({minV, maxV}) => {
                 let inputs = document.querySelectorAll('input');
                 if (inputs.length >= 2) {
-                    inputs[0].value = minV;
+                    let nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+                    
+                    nativeSetter.call(inputs[0], minV);
                     inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
                     inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
                     
-                    inputs[1].value = maxV;
+                    nativeSetter.call(inputs[1], maxV);
                     inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
                     inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
                 }
             }
         """, {"minV": int(min_val), "maxV": int(max_val)})
 
-        await asyncio.sleep(0.3)
-        # 3. Click 🔍 search icon button
+        await asyncio.sleep(0.4)
         await tap_point(page, 358, 125)
         await asyncio.sleep(0.8)
     except Exception:
@@ -411,7 +409,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # Set initial Min-Max filter
             await set_custom_price_filter(page, min_val, max_val)
             await asyncio.sleep(1.2)
 
@@ -420,7 +417,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
-                    caption=f"✅ **Min-Max Filter Applied (Min: {int(min_val)}, Max: {int(max_val)})!**\nScanning orders...",
+                    caption=f"✅ **Forced Min-Max Filter Applied (Min: {int(min_val)}, Max: {int(max_val)})!**\nScanning orders...",
                     parse_mode="Markdown"
                 )
             except Exception:
@@ -432,7 +429,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 0. Check Bank Details Page (#/buyingbymod)
                 cur_url = page.url
                 b_text = await page.evaluate("() => document.body.innerText")
                 if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
@@ -451,7 +447,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # 1. Check Notify Popup ("need to pay!" -> Go pay)
                 notify_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -491,7 +486,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                # 2. Handle 'Please slow down' / 'Failed to pick up order' -> Click 'Stay'
                 stay_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -515,7 +509,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(1.0)
                     continue
 
-                # 3. Scan all `div.buyitem` cards in DOM matching min-max range
                 scan_result = await page.evaluate(r"""
                     ({minV, maxV}) => {
                         let allPrices = [];
@@ -586,8 +579,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         pass
 
                     await click_wallet_option(page, pay_mode)
-                    
-                    # Exact 3 seconds wait for bank details to load
                     await asyncio.sleep(3.0)
 
                     try:
@@ -719,7 +710,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active (Min-Max Filter)**\n"
+                                f"🚀 **Auto-Buy Active (Forced Min-Max)**\n"
                                 f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans:** `{scan_count}` | **Retries:** `{retry_count}`\n"
@@ -731,7 +722,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Refresh list using Min-Max filter and 🔍 icon
                 await set_custom_price_filter(page, min_val, max_val)
                 await asyncio.sleep(1.2)
 
