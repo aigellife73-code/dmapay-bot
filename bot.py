@@ -699,18 +699,17 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            filter_ok = await set_custom_price_filter(page, min_val, max_val, debug_ctx=(context, chat_id))
-            await asyncio.sleep(1.0)
-
+            # Site ke Min/Max box me koi real <input> hai hi nahi (confirmed), isliye
+            # usse set karne ki koshish nahi karte - bot khud JS se har order ka price
+            # padh ke range match karta hai (get_matching_orders), jo already kaam kar raha hai.
             try:
                 init_shot = await page.screenshot()
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
                     caption=(
-                        f"{'✅' if filter_ok else '⚠️'} **Min-Max Filter "
-                        f"{'Applied' if filter_ok else 'Verify Nahi Hua'} "
-                        f"(Min: {int(min_val)}, Max: {int(max_val)})**\nScanning orders..."
+                        f"✅ **Scanning Shuru (Min: {int(min_val)}, Max: {int(max_val)})**\n"
+                        f"Apna range filter bot khud JS se match karta hai, site ke filter box pe depend nahi."
                     ),
                     parse_mode="Markdown"
                 )
@@ -827,8 +826,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         retry_count += 1
                         await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
                         await asyncio.sleep(1.5)
-                        await set_custom_price_filter(page, min_val, max_val)
-                        await asyncio.sleep(1.0)
                         continue
 
                     # real failure (kisi aur ne grab kiya) hi dismiss karo
@@ -984,8 +981,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                await refresh_filter(page, min_val, max_val)
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
 
             await browser.close()
     except Exception as e:
