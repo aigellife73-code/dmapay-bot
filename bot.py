@@ -149,7 +149,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     await query.edit_message_text(
         f"📱 **Account: `{phone}`**\n\n"
-        f"Ab **Target Amount** bhejein (jaise `1000` ya `2500`):",
+        f"Ab **Target Amount ya Range** bhejein (jaise `2000`, `1000` ya `500-900`):",
         parse_mode="Markdown"
     )
 
@@ -196,15 +196,19 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Pehle `/start` dabakar Account select karein ya 10-digit number bhejein!")
             return
 
-    if not text.isdigit():
-        await update.message.reply_text("❌ Sahi Amount dalein! (Jaise `1000` ya `2500`):")
+    if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
+        await update.message.reply_text("❌ Sahi Amount ya Range dalein! (Jaise `2000` ya `500-900`):")
         return
 
-    context.user_data['target_amount'] = text
+    context.user_data['target_amount'] = text.replace(" ", "")
     context.user_data['state'] = ''
+    
+    # KUN 2 KNAPPER: Mobikwik og Amazon (3. mulighed er fjernet som ønsket)
     buttons = [
-        [InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"), InlineKeyboardButton("💳 Amazon", callback_data="pay_amazon")],
-        [InlineKeyboardButton("💳 Any / First Available", callback_data="pay_all")]
+        [
+            InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"),
+            InlineKeyboardButton("💳 Amazon", callback_data="pay_amazon")
+        ]
     ]
     await update.message.reply_text(
         f"📱 **Account:** `{active_phone}`\n"
@@ -225,10 +229,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     session_data = accounts.get(phone, {})
     
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Fully Active ('All' Tab + Auto-Scroll)**\n"
-        f"📱 `{phone}` | 💰 Target: ₹{target_amt} | 💳 {pay_mode}\n\n"
+        f"🚀 **Auto-Buy Active ('All' Tab + Full DOM Scan)**\n"
+        f"📱 `{phone}` | 💰 Target: `₹{target_amt}` | 💳 {pay_mode}\n\n"
         f"⏱️ **Live Timer:** `00:00`\n"
-        f"🔍 **Status:** Selecting 'All' & scrolling to scan all orders...\n\n"
+        f"🔍 **Status:** Selecting visible 'All' tab & scanning all orders...\n\n"
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
@@ -255,21 +259,75 @@ async def tap_element_center(page, box):
     cy = box["y"] + box["height"] / 2
     await tap_point(page, cx, cy)
 
-async def select_all_tab(page):
+async def select_visible_all_tab(page):
+    """
+    Finder og klikker specifikt på den synlige 'All' chip (span.amt-range-item med rect.left > 0)
+    og klikker også på forstørrelsesglasset (🔍) hvis det er synligt.
+    """
     try:
-        clicked = await page.evaluate(r"""
+        # 1. Åbn filter-skuffen hvis 'All' chippen ikke er synlig (height == 0)
+        is_visible = await page.evaluate(r"""
             () => {
-                let els = Array.from(document.querySelectorAll('div, span, a, li'));
-                let allEl = els.find(e => (e.innerText || '').trim() === 'All');
-                if (allEl) {
-                    allEl.click();
-                    return true;
-                }
-                return false;
+                let chips = Array.from(document.querySelectorAll('span.amt-range-item'));
+                return chips.some(c => c.getBoundingClientRect().left > 0 && c.getBoundingClientRect().height > 5);
             }
         """)
-        if clicked:
-            await asyncio.sleep(0.8)
+        if not is_visible:
+            # Klik på pilen til venstre for 'Min' (x: 65, y: 122-170)
+            arrow_pos = await page.evaluate(r"""
+                () => {
+                    let allEls = Array.from(document.querySelectorAll('div, span, i, svg'));
+                    let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min');
+                    if (minEl) {
+                        let r = minEl.getBoundingClientRect();
+                        return {x: Math.max(20, r.left - 25), y: r.top + r.height / 2};
+                    }
+                    return {x: 62, y: 125};
+                }
+            """)
+            if arrow_pos:
+                await tap_point(page, arrow_pos["x"], arrow_pos["y"])
+                await asyncio.sleep(0.4)
+
+        # 2. Find den SYNLIGE 'All' chip (rect.left > 0) på den aktive UPI-fane
+        chip_box = await page.evaluate(r"""
+            () => {
+                let chips = Array.from(document.querySelectorAll('span.amt-range-item'));
+                for (let c of chips) {
+                    let t = (c.innerText || '').trim();
+                    let r = c.getBoundingClientRect();
+                    if (t === 'All' && r.left > 0 && r.width > 10 && r.height > 10) {
+                        c.click();
+                        return {x: r.left, y: r.top, width: r.width, height: r.height};
+                    }
+                }
+                return null;
+            }
+        """)
+        if chip_box:
+            await tap_element_center(page, chip_box)
+            await asyncio.sleep(0.4)
+    except Exception:
+        pass
+
+async def click_magnify_or_refresh(page):
+    """Klikker på 🔍 knappen eller den synlige 'All' chip for at opdatere listen"""
+    try:
+        mag_box = await page.evaluate(r"""
+            () => {
+                let allEls = Array.from(document.querySelectorAll('div, span, i, svg, img'));
+                let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min' && e.getBoundingClientRect().left > 0);
+                if (minEl) {
+                    let r = minEl.getBoundingClientRect();
+                    return {x: 358, y: r.top + r.height / 2};
+                }
+                return null;
+            }
+        """)
+        if mag_box:
+            await tap_point(page, mag_box["x"], mag_box["y"])
+            await asyncio.sleep(0.3)
+        await select_visible_all_tab(page)
     except Exception:
         pass
 
@@ -293,9 +351,6 @@ async def click_wallet_option(page, pay_mode: str):
                 } else if (targetMode === 'amazon' && (t.includes('@yapl') || t === 'amazon')) {
                     targetEl = el;
                     if (t.includes('@yapl')) break;
-                } else if (targetMode === 'all' && (t.includes('@') || t === 'mobikwik' || t === 'amazon')) {
-                    targetEl = el;
-                    break;
                 }
             }
             
@@ -349,7 +404,20 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
     start_time = time.time()
     scan_count = 0
     retry_count = 0
-    target_val = float(target_amt.replace('₹','').strip())
+
+    min_val, max_val = 0.0, 0.0
+    if '-' in target_amt:
+        parts = target_amt.split('-')
+        try:
+            min_val = float(parts[0].strip())
+            max_val = float(parts[1].strip())
+        except Exception:
+            min_val = max_val = 1000.0
+    else:
+        try:
+            min_val = max_val = float(target_amt.replace('₹', '').strip())
+        except Exception:
+            min_val = max_val = 1000.0
 
     try:
         async with async_playwright() as p:
@@ -373,20 +441,20 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            await select_all_tab(page)
+            # Klik på den synlige 'All' chip
+            await select_visible_all_tab(page)
+            await asyncio.sleep(1.0)
 
             try:
                 init_shot = await page.screenshot()
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
-                    caption=f"✅ **'All' Tab & Auto-Scroll Active!**\nScanning exact amount: ₹{int(target_val)}...",
+                    caption=f"✅ **Visible 'All' Tab Selected!**\nScanning all `div.buyitem` cards (including hidden ones below screen) for: `₹{target_amt}`",
                     parse_mode="Markdown"
                 )
             except Exception:
                 pass
-
-            scroll_direction = 1 # 1 for down, -1 for up
 
             while running_tasks.get(chat_id, {}).get("active", False):
                 scan_count += 1
@@ -394,6 +462,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
+                # 0. Tjek om Bank Details siden (#/buyingbymod) er åben
                 cur_url = page.url
                 b_text = await page.evaluate("() => document.body.innerText")
                 if "buyingbymod" in cur_url and ("IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text):
@@ -405,13 +474,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         photo=shot,
                         caption=(
                             f"🎉 **Bank Details Aa Gayi! Order Matched & Stopped!**\n"
-                            f"💰 **Target:** ₹{int(target_val)} | 💳 **Mode:** `{pay_mode}`\n"
+                            f"💰 **Target:** `₹{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
                         parse_mode="Markdown"
                     )
                     break
 
+                # 1. Tjek Notify Popup ("need to pay!" -> Go pay)
                 notify_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -444,13 +514,14 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         photo=shot,
                         caption=(
                             f"🎉 **Order Matched & Bank Details Opened!**\n"
-                            f"💰 **Target:** ₹{int(target_val)} | 💳 **Mode:** `{pay_mode}`\n"
+                            f"💰 **Target:** `₹{target_amt}` | 💳 **Mode:** `{pay_mode}`\n"
                             f"⏱️ **Time Taken:** `{timer_str}`"
                         ),
                         parse_mode="Markdown"
                     )
                     break
 
+                # 2. Håndter 'Please slow down' / 'Failed to pick up order' -> Klik 'Stay'
                 stay_box = await page.evaluate(r"""
                     () => {
                         let divs = Array.from(document.querySelectorAll('div, span, p, button'));
@@ -474,52 +545,55 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(1.0)
                     continue
 
+                # 3. Sikr at 'All' chippen stadig har 'active' class
+                await select_visible_all_tab(page)
+
+                # 4. SCAN ALLE div.buyitem KORT I HELE DOM'EN (Også dem der ligger skjult langt nede i div.md-scroll-view!)
                 scan_result = await page.evaluate(r"""
-                    (targetV) => {
-                        let visiblePrices = [];
-                        let allEls = Array.from(document.querySelectorAll('button, div, span, a'));
-                        for (let el of allEls) {
-                            let txt = (el.innerText || '').trim();
-                            if (txt !== 'Buy') continue;
+                    ({minV, maxV}) => {
+                        let allPrices = [];
+                        let items = Array.from(document.querySelectorAll('div.buyitem'));
+                        
+                        for (let item of items) {
+                            let rItem = item.getBoundingClientRect();
+                            // Ignorer kort der ligger på inaktive/skjulte swiper-faner (x < 0 eller width == 0)
+                            if (rItem.width === 0 || rItem.left < 0 || rItem.left >= window.innerWidth) continue;
                             
-                            let hasSameChild = Array.from(el.children).some(c => (c.innerText || '').trim() === 'Buy');
-                            if (hasSameChild) continue;
-                            
-                            let rect = el.getBoundingClientRect();
-                            if (rect.top < 120 || rect.top > 800 || rect.width < 25) continue;
-                            
-                            let card = el.parentElement;
-                            for (let i = 0; i < 7; i++) {
-                                if (!card) break;
-                                let cText = card.innerText || '';
-                                if (cText.includes('₹') && (cText.includes('Price') || cText.includes('Reward') || cText.includes('Itoken'))) {
-                                    let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
-                                    if (m && m[1]) {
-                                        let val = parseFloat(m[1].replace(/,/g, ''));
-                                        visiblePrices.push(val);
-                                        if (val === targetV) {
-                                            el.click();
-                                            return {
-                                                found: true,
-                                                amount: val,
-                                                box: {x: rect.left, y: rect.top, width: rect.width, height: rect.height},
-                                                prices: visiblePrices
-                                            };
-                                        }
+                            let cText = item.innerText || '';
+                            let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
+                            if (m && m[1]) {
+                                let val = parseFloat(m[1].replace(/,/g, ''));
+                                allPrices.push(val);
+                                
+                                if (val >= minV && val <= maxV) {
+                                    let btn = item.querySelector('button');
+                                    if (btn) {
+                                        // Scroll kortet ind i midten af skærmen og klik direkte!
+                                        item.scrollIntoView({behavior: 'instant', block: 'center'});
+                                        btn.click();
+                                        let br = btn.getBoundingClientRect();
+                                        return {
+                                            found: true,
+                                            amount: val,
+                                            box: {x: br.left, y: br.top, width: br.width, height: br.height},
+                                            prices: allPrices,
+                                            totalCards: items.length
+                                        };
                                     }
-                                    break;
                                 }
-                                card = card.parentElement;
                             }
                         }
-                        return {found: false, prices: visiblePrices};
+                        return {found: false, prices: allPrices, totalCards: items.length};
                     }
-                """, target_val)
+                """, {"minV": min_val, "maxV": max_val})
 
                 visible_prices = scan_result.get("prices", []) if scan_result else []
 
                 if scan_result and scan_result.get("found"):
                     amt = scan_result.get("amount")
+                    box = scan_result.get("box")
+                    if box and box["y"] > 0 and box["y"] < 840:
+                        await tap_element_center(page, box)
                     
                     try:
                         await context.bot.edit_message_text(
@@ -549,7 +623,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     await click_wallet_option(page, pay_mode)
                     
-                    # 3 seconds wait for bank details to load securely
+                    # Vent 3 sekunder på at bankoplysninger indlæses
                     await asyncio.sleep(3.0)
 
                     try:
@@ -618,7 +692,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     if step_result == "failed_retry":
                         retry_count += 1
                         await asyncio.sleep(1.2)
-                        await select_all_tab(page)
+                        await click_magnify_or_refresh(page)
                         await asyncio.sleep(1.0)
                         continue
 
@@ -673,18 +747,21 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     )
                     break
 
-                if scan_count % 3 == 0:
-                    prices_str = ", ".join([f"₹{int(p)}" for p in visible_prices[:5]]) if visible_prices else "None"
+                # Vis unikke priser fra hele listen (både top og bund) i statusbeskeden
+                if scan_count % 2 == 0:
+                    unique_prices = sorted(list(set(int(p) for p in visible_prices)))
+                    prices_str = ", ".join([f"₹{p}" for p in unique_prices[:10]]) if unique_prices else "None"
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
                             message_id=message_id,
                             text=(
-                                f"🚀 **Auto-Buy Active ('All' Tab + Auto-Scroll)**\n"
-                                f"📱 `{phone}` | 💰 Target: ₹{int(target_val)} | 💳 {pay_mode}\n\n"
+                                f"🚀 **Auto-Buy Active ('All' Tab + Full List Scan)**\n"
+                                f"📱 `{phone}` | 💰 Target: `₹{target_amt}` | 💳 {pay_mode}\n\n"
                                 f"⏱️ **Live Timer:** `{timer_str}`\n"
                                 f"🔄 **Scans:** `{scan_count}` | **Retries:** `{retry_count}`\n"
-                                f"👀 **Screen Prices:** `{prices_str}`\n\n"
+                                f"📦 **Total Orders Scanned:** `{len(visible_prices)}`\n"
+                                f"👀 **Available Prices:** `{prices_str}`\n\n"
                                 f"🛑 Rokne ke liye `/stop` bhejein."
                             ),
                             parse_mode="Markdown"
@@ -692,17 +769,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                # Auto-Scroll down and up smoothly to check hidden orders
-                await page.evaluate(f"window.scrollBy(0, {250 * scroll_direction})")
-                
-                scroll_pos = await page.evaluate("window.pageYOffset")
-                max_scroll = await page.evaluate("document.body.scrollHeight - window.innerHeight")
-                if scroll_pos >= max_scroll - 50:
-                    scroll_direction = -1
-                elif scroll_pos <= 10:
-                    scroll_direction = 1
-
-                await asyncio.sleep(1.0)
+                # Opdater listen ved at klikke på 🔍 / 'All'
+                await click_magnify_or_refresh(page)
+                await asyncio.sleep(1.2)
 
             await browser.close()
     except Exception as e:
