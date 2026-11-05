@@ -290,7 +290,8 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Set Range", parse_mode="Markdown")
         return
 
-    context.user_data['target_amount'] = text.replace(" ", "")
+    target_amt = text.replace(" ", "")
+    context.user_data['target_amount'] = target_amt
     context.user_data['state'] = ''
 
     wait_msg = await update.message.reply_text("🔍 **Checking Active UPI...**", parse_mode="Markdown")
@@ -301,23 +302,20 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = []
     if active_upis:
-        context.user_data['active_upis'] = active_upis
         for idx, item in enumerate(active_upis):
-            buttons.append([InlineKeyboardButton(f"✅ {item['label']}", callback_data=f"pay_{idx}")])
+            # Encode amount and mode directly in callback data so it never falls back
+            cdata = f"pay_{target_amt}_{item['mode']}"
+            buttons.append([InlineKeyboardButton(f"✅ {item['label']}", callback_data=cdata)])
         await wait_msg.edit_text(
             f"Set Range\n\n👇 **Active UPI select karein:**",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown"
         )
     else:
-        context.user_data['active_upis'] = [
-            {"wallet": "Amazon", "upi": "", "label": "Amazon", "mode": "amazon"},
-            {"wallet": "Mobikwik", "upi": "", "label": "Mobikwik", "mode": "mobikwik"}
-        ]
         buttons = [
             [
-                InlineKeyboardButton("💳 Amazon", callback_data="pay_0"),
-                InlineKeyboardButton("💳 Mobikwik", callback_data="pay_1")
+                InlineKeyboardButton("💳 Amazon", callback_data=f"pay_{target_amt}_amazon"),
+                InlineKeyboardButton("💳 Mobikwik", callback_data=f"pay_{target_amt}_mobikwik")
             ]
         ]
         await wait_msg.edit_text(
@@ -330,18 +328,28 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    idx_str = query.data.replace("pay_", "")
+    
+    # Parse callback data: pay_{target_amt}_{mode}
+    parts = query.data.split("_")
+    target_amt = parts[1] if len(parts) > 1 else "1000"
+    pay_mode = parts[2] if len(parts) > 2 else "amazon"
+
     chat_id = update.effective_chat.id
     phone = context.user_data.get('active_phone', '')
-    target_amt = context.user_data.get('target_amount', '1000')
-
-    active_upis = context.user_data.get('active_upis', [])
-    selected_upi = {"wallet": "Amazon", "upi": "", "label": "Amazon", "mode": "amazon"}
-    if idx_str.isdigit() and int(idx_str) < len(active_upis):
-        selected_upi = active_upis[int(idx_str)]
+    if not phone:
+        accounts = get_user_accounts(chat_id)
+        if accounts:
+            phone = list(accounts.keys())[0]
 
     accounts = get_user_accounts(chat_id)
     session_data = accounts.get(phone, {})
+
+    selected_upi = {
+        "wallet": pay_mode.capitalize(),
+        "upi": "",
+        "label": pay_mode.capitalize(),
+        "mode": pay_mode
+    }
 
     status_msg = await query.edit_message_text(
         f"🚀 **Auto-Buy Active**\n"
@@ -380,7 +388,7 @@ async def tap_element_center(page, box):
 
 async def set_min_max_via_js(page, min_val: float, max_val: float):
     """
-    Directly sets the range on Vue.js fake inputs and components without messing with the broken keypad.
+    Directly sets the range on Vue.js fake inputs and updates innerText so website recognizes it correctly.
     """
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
@@ -388,21 +396,15 @@ async def set_min_max_via_js(page, min_val: float, max_val: float):
             ({minV, maxV}) => {
                 let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
                 if (items.length >= 2) {
-                    // Update Min fake span/text
                     let minSpan = items[0].querySelector('.md-input-item-fake span');
                     if (minSpan) minSpan.innerText = minV;
                     let minFake = items[0].querySelector('.md-input-item-fake');
-                    if (minFake) {
-                        minFake.classList.remove('is-waiting');
-                    }
+                    if (minFake) minFake.classList.remove('is-waiting');
 
-                    // Update Max fake span/text
                     let maxSpan = items[1].querySelector('.md-input-item-fake span');
                     if (maxSpan) maxSpan.innerText = maxV;
                     let maxFake = items[1].querySelector('.md-input-item-fake');
-                    if (maxFake) {
-                        maxFake.classList.remove('is-waiting');
-                    }
+                    if (maxFake) maxFake.classList.remove('is-waiting');
                 }
             }
         """, {"minV": min_s, "maxV": max_s})
