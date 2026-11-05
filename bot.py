@@ -14,16 +14,22 @@ SESSION_DIR = "dmapay_sessions"
 last_sync_ts = 0
 running_tasks = {}
 
+
 class DummyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"DMAPay Bot Live")
 
+    def log_message(self, *args):
+        pass
+
+
 def run_server():
     port = int(os.environ.get("PORT", 8000))
     server = HTTPServer(("0.0.0.0", port), DummyServer)
     server.serve_forever()
+
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -34,20 +40,25 @@ def load_json(path, default):
             return default
     return default
 
+
 def save_json(path, data):
     with open(path, "w") as f:
         json.dump(data, f, indent=4)
+
 
 def load_accounts():
     data = load_json(ACCOUNTS_FILE, {})
     return data if isinstance(data, dict) else {}
 
+
 def save_accounts(data):
     save_json(ACCOUNTS_FILE, data)
+
 
 def get_user_accounts(user_id: int):
     all_acc = load_accounts()
     return dict(all_acc.get(str(user_id), {}))
+
 
 def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     accs = load_accounts()
@@ -55,6 +66,7 @@ def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
         accs[uid_str] = {}
     accs[uid_str][phone] = sess_json
     save_accounts(accs)
+
 
 def generate_user_bookmarklet(uid, phone) -> str:
     return (
@@ -70,7 +82,8 @@ def generate_user_bookmarklet(uid, phone) -> str:
         f"}}else{{alert('❌ Error: '+JSON.stringify(res));}}}}).catch(e=>alert('❌ Network Error: '+e));}})();"
     )
 
-async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
+
+async def poll_bookmark_sync(context):
     global last_sync_ts
     try:
         desc_obj = await context.bot.get_my_description(language_code="zu")
@@ -84,7 +97,7 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
         fid = str(data.get("f", "")).strip()
         if not uid or not phone or not fid:
             return
-        
+
         existing_accs = get_user_accounts(int(uid))
         if ts <= last_sync_ts and phone in existing_accs:
             return
@@ -105,27 +118,29 @@ async def poll_bookmark_sync(context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
     user = update.effective_user
     if not user:
         return
-    
+
     await poll_bookmark_sync(context)
     context.user_data.clear()
     accounts = get_user_accounts(user.id)
-    
+
     buttons = []
     for phone in accounts.keys():
         buttons.append([InlineKeyboardButton(f"📱 {phone} (Auto-Buy Setup)", callback_data=f"setup_{phone}")])
     buttons.append([InlineKeyboardButton("➕ Add Account / Sync", callback_data="add_acc")])
-    
+
     txt = "🤖 **DMAPay Auto-Buy Bot**\n\nApna account chunein ya naya jodein:"
     if update.callback_query:
         await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
         await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -135,11 +150,13 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("ℹ️ Koi bhi Auto-Buy task active nahi hai.")
 
+
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data['state'] = 'WAIT_PHONE'
     await query.edit_message_text("👉 Apna **10-digit Phone Number** bhejein:", parse_mode="Markdown")
+
 
 async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -153,6 +170,7 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+
 async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type in ["group", "supergroup"]:
         return
@@ -164,7 +182,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit() or len(text) != 10:
             await update.message.reply_text("❌ Kripya sahi **10-digit Phone Number** dalein:", parse_mode="Markdown")
             return
-        
+
         context.user_data['state'] = ''
         bm = generate_user_bookmarklet(chat_id, text)
         await poll_bookmark_sync(context)
@@ -172,7 +190,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         extra_btn = []
         if text in accounts:
             extra_btn.append([InlineKeyboardButton(f"🚀 Direct Setup {text} (Synced)", callback_data=f"setup_{text}")])
-        
+
         msg = (
             f"✅ **Number `{text}` Registered!**\n\n"
             f"🔖 **Auto-Login Bookmark Code:**\n\n`{bm}`\n\n"
@@ -202,7 +220,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data['target_amount'] = text.replace(" ", "")
     context.user_data['state'] = ''
-    
+
     buttons = [
         [
             InlineKeyboardButton("💳 Mobikwik", callback_data="pay_mobikwik"),
@@ -217,16 +235,17 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
+
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     pay_mode = query.data.replace("pay_", "")
     chat_id = update.effective_chat.id
     phone = context.user_data.get('active_phone', '')
     target_amt = context.user_data.get('target_amount', '1000')
-    
+
     accounts = get_user_accounts(chat_id)
     session_data = accounts.get(phone, {})
-    
+
     status_msg = await query.edit_message_text(
         f"🚀 **Auto-Buy Active (Native Min-Max)**\n"
         f"📱 `{phone}` | 💰 Target: `{target_amt}` | 💳 {pay_mode}\n\n"
@@ -235,13 +254,14 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
         f"🛑 Rokne ke liye `/stop` bhejein.",
         parse_mode="Markdown"
     )
-    
+
     if chat_id in running_tasks:
         running_tasks[chat_id]["active"] = False
         await asyncio.sleep(1)
-        
+
     running_tasks[chat_id] = {"active": True}
     asyncio.create_task(run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, status_msg.message_id, context))
+
 
 async def tap_point(page, x, y):
     try:
@@ -253,51 +273,112 @@ async def tap_point(page, x, y):
     except Exception:
         pass
 
+
 async def tap_element_center(page, box):
     cx = box["x"] + box["width"] / 2
     cy = box["y"] + box["height"] / 2
     await tap_point(page, cx, cy)
 
-async def set_custom_price_filter(page, min_val: float, max_val: float):
-    """Native setter ka use karke Vue.js inputs me force value set karta hai"""
-    try:
-        arrow_box = await page.evaluate(r"""
-            () => {
-                let allEls = Array.from(document.querySelectorAll('div, span, i, svg'));
-                let minEl = allEls.find(e => (e.innerText || '').trim() === 'Min');
-                if (minEl) {
-                    let r = minEl.getBoundingClientRect();
-                    return {x: Math.max(20, r.left - 25), y: r.top + r.height / 2};
-                }
-                return {x: 62, y: 125};
-            }
-        """)
-        if arrow_box:
-            await tap_point(page, arrow_box["x"], arrow_box["y"])
-            await asyncio.sleep(0.4)
 
-        await page.evaluate(r"""
-            ({minV, maxV}) => {
-                let inputs = document.querySelectorAll('input');
-                if (inputs.length >= 2) {
-                    let nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
-                    
-                    nativeSetter.call(inputs[0], minV);
-                    inputs[0].dispatchEvent(new Event('input', { bubbles: true }));
-                    inputs[0].dispatchEvent(new Event('change', { bubbles: true }));
-                    
-                    nativeSetter.call(inputs[1], maxV);
-                    inputs[1].dispatchEvent(new Event('input', { bubbles: true }));
-                    inputs[1].dispatchEvent(new Event('change', { bubbles: true }));
-                }
-            }
-        """, {"minV": int(min_val), "maxV": int(max_val)})
+async def get_filter_inputs(page):
+    inputs = await page.query_selector_all("input")
+    vis = []
+    for inp in inputs:
+        try:
+            bb = await inp.bounding_box()
+        except Exception:
+            bb = None
+        if bb and bb["width"] > 15 and bb["height"] > 10 and bb["y"] < 300:
+            vis.append((round(bb["y"] / 20), bb["x"], inp, bb))
+    vis.sort(key=lambda t: (t[0], t[1]))
+    return vis
 
-        await asyncio.sleep(0.4)
+
+async def read_filter_values(page):
+    return await page.evaluate(r"""
+        () => Array.from(document.querySelectorAll('input'))
+            .filter(i => {
+                let r = i.getBoundingClientRect();
+                return r.width > 15 && r.height > 10 && r.top < 300;
+            })
+            .slice(0, 2).map(i => i.value)
+    """)
+
+
+async def click_search_icon(page, max_bb, max_inp=None):
+    icon = await page.evaluate(r"""
+        (mx) => {
+            let best = null;
+            for (let e of document.querySelectorAll('svg, i, img, span, div')) {
+                let r = e.getBoundingClientRect();
+                if (r.width < 14 || r.width > 50 || r.height < 14 || r.height > 50) continue;
+                if (r.left < mx.x + mx.width) continue;
+                if (Math.abs((r.top + r.height / 2) - (mx.y + mx.height / 2)) > 20) continue;
+                if (!best || r.left > best.left) best = r;
+            }
+            return best ? {x: best.left + best.width / 2, y: best.top + best.height / 2} : null;
+        }
+    """, max_bb)
+    if icon:
+        await tap_point(page, icon["x"], icon["y"])
+    elif max_inp is not None:
+        try:
+            await max_inp.press("Enter")
+        except Exception:
+            pass
+    else:
         await tap_point(page, 358, 125)
-        await asyncio.sleep(0.8)
+
+
+async def set_custom_price_filter(page, min_val: float, max_val: float):
+    min_s, max_s = str(int(min_val)), str(int(max_val))
+    try:
+        for attempt in range(3):
+            vis = await get_filter_inputs(page)
+
+            if len(vis) < 2:
+                await tap_point(page, 62, 125)
+                await asyncio.sleep(0.6)
+                continue
+
+            min_inp, max_inp = vis[0][2], vis[1][2]
+            max_bb = vis[1][3]
+
+            for inp, val in ((min_inp, min_s), (max_inp, max_s)):
+                await inp.click(click_count=3)
+                await page.keyboard.press("Control+A")
+                await page.keyboard.press("Backspace")
+                await page.keyboard.type(val, delay=30)
+                await inp.evaluate(
+                    "e => { e.dispatchEvent(new Event('input',{bubbles:true})); "
+                    "e.dispatchEvent(new Event('change',{bubbles:true})); e.blur(); }"
+                )
+                await asyncio.sleep(0.15)
+
+            await click_search_icon(page, max_bb, max_inp)
+            await asyncio.sleep(0.9)
+
+            got = await read_filter_values(page)
+            if len(got) >= 2 and got[0] == min_s and got[1] == max_s:
+                return True
+        return False
     except Exception:
-        pass
+        return False
+
+
+async def refresh_filter(page, min_val: float, max_val: float):
+    min_s, max_s = str(int(min_val)), str(int(max_val))
+    try:
+        got = await read_filter_values(page)
+        if len(got) >= 2 and got[0] == min_s and got[1] == max_s:
+            vis = await get_filter_inputs(page)
+            if len(vis) >= 2:
+                await click_search_icon(page, vis[1][3], vis[1][2])
+                return True
+        return await set_custom_price_filter(page, min_val, max_val)
+    except Exception:
+        return False
+
 
 async def click_wallet_option(page, pay_mode: str):
     mode = pay_mode.lower().strip()
@@ -305,14 +386,14 @@ async def click_wallet_option(page, pay_mode: str):
         (targetMode) => {
             let nodes = Array.from(document.querySelectorAll('div, span, p, li, label'));
             let targetEl = null;
-            
+
             for (let el of nodes) {
                 let t = (el.innerText || '').trim().toLowerCase();
                 if (!t || t.startsWith('wallets:') || t.includes('pay using') || t.includes('manage upi')) continue;
-                
+
                 let r = el.getBoundingClientRect();
                 if (r.top < 240 || r.top > 790 || r.height > 90 || r.height < 12) continue;
-                
+
                 if (targetMode === 'mobikwik' && (t.includes('@mbk') || t === 'mobikwik')) {
                     targetEl = el;
                     if (t.includes('@mbk')) break;
@@ -321,9 +402,9 @@ async def click_wallet_option(page, pay_mode: str):
                     if (t.includes('@yapl')) break;
                 }
             }
-            
+
             if (!targetEl) return null;
-            
+
             let row = targetEl;
             for (let i = 0; i < 4; i++) {
                 if (!row.parentElement) break;
@@ -334,10 +415,10 @@ async def click_wallet_option(page, pay_mode: str):
                 }
                 row = row.parentElement;
             }
-            
+
             row.click();
             targetEl.click();
-            
+
             let children = row.querySelectorAll('*');
             let radioRect = null;
             for (let c of children) {
@@ -347,7 +428,7 @@ async def click_wallet_option(page, pay_mode: str):
                     radioRect = {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
                 }
             }
-            
+
             let rr = row.getBoundingClientRect();
             let cy = rr.top + rr.height / 2;
             return {
@@ -368,6 +449,21 @@ async def click_wallet_option(page, pay_mode: str):
         return True
     return False
 
+
+STAY_JS = r"""
+    () => {
+        let divs = Array.from(document.querySelectorAll('div, span, p, button'));
+        let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
+        if (stayBtn) {
+            stayBtn.click();
+            let r = stayBtn.getBoundingClientRect();
+            return {x: r.left, y: r.top, width: r.width, height: r.height};
+        }
+        return null;
+    }
+"""
+
+
 async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, message_id, context):
     start_time = time.time()
     scan_count = 0
@@ -386,6 +482,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             min_val = max_val = float(target_amt.replace('₹', '').strip())
         except Exception:
             min_val = max_val = 1000.0
+
+    if min_val > max_val:
+        min_val, max_val = max_val, min_val
 
     try:
         async with async_playwright() as p:
@@ -409,7 +508,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
             await page.goto("https://web.dmapay.vip/#/buy", wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            await set_custom_price_filter(page, min_val, max_val)
+            filter_ok = await set_custom_price_filter(page, min_val, max_val)
             await asyncio.sleep(1.2)
 
             try:
@@ -417,7 +516,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 await context.bot.send_photo(
                     chat_id=chat_id,
                     photo=init_shot,
-                    caption=f"✅ **Forced Min-Max Filter Applied (Min: {int(min_val)}, Max: {int(max_val)})!**\nScanning orders...",
+                    caption=(
+                        f"{'✅' if filter_ok else '⚠️'} **Min-Max Filter "
+                        f"{'Applied' if filter_ok else 'Verify Nahi Hua'} "
+                        f"(Min: {int(min_val)}, Max: {int(max_val)})**\nScanning orders..."
+                    ),
                     parse_mode="Markdown"
                 )
             except Exception:
@@ -513,17 +616,17 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     ({minV, maxV}) => {
                         let allPrices = [];
                         let items = Array.from(document.querySelectorAll('div.buyitem'));
-                        
+
                         for (let item of items) {
                             let rItem = item.getBoundingClientRect();
                             if (rItem.width === 0 || rItem.left < 0 || rItem.left >= window.innerWidth) continue;
-                            
+
                             let cText = item.innerText || '';
                             let m = cText.match(/₹\s*([0-9,]+(\.[0-9]+)?)/);
                             if (m && m[1]) {
                                 let val = parseFloat(m[1].replace(/,/g, ''));
                                 allPrices.push(val);
-                                
+
                                 if (val >= minV && val <= maxV) {
                                     let btn = item.querySelector('button');
                                     if (btn) {
@@ -551,7 +654,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     box = scan_result.get("box")
                     if box and box["y"] > 0 and box["y"] < 840:
                         await tap_element_center(page, box)
-                    
+
                     try:
                         await context.bot.edit_message_text(
                             chat_id=chat_id,
@@ -596,20 +699,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     for _ in range(15):
                         await asyncio.sleep(0.3)
                         body_txt = await page.evaluate("() => document.body.innerText")
-                        
+
                         if "Failed to pick up order" in body_txt or "Please slow down" in body_txt or "Tips" in body_txt:
-                            s_box = await page.evaluate(r"""
-                                () => {
-                                    let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-                                    let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                    if (stayBtn) {
-                                        stayBtn.click();
-                                        let r = stayBtn.getBoundingClientRect();
-                                        return {x: r.left, y: r.top, width: r.width, height: r.height};
-                                    }
-                                    return null;
-                                }
-                            """)
+                            s_box = await page.evaluate(STAY_JS)
                             if s_box:
                                 await tap_element_center(page, s_box)
                             step_result = "failed_retry"
@@ -656,20 +748,9 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                         await asyncio.sleep(0.4)
                         cur_url = page.url
                         b_text = await page.evaluate("() => document.body.innerText")
-                        
+
                         if "Failed to pick up order" in b_text or "Please slow down" in b_text:
-                            s_box = await page.evaluate(r"""
-                                () => {
-                                    let divs = Array.from(document.querySelectorAll('div, span, p, button'));
-                                    let stayBtn = divs.find(b => (b.innerText || '').trim() === 'Stay');
-                                    if (stayBtn) {
-                                        stayBtn.click();
-                                        let r = stayBtn.getBoundingClientRect();
-                                        return {x: r.left, y: r.top, width: r.width, height: r.height};
-                                    }
-                                    return null;
-                                }
-                            """)
+                            s_box = await page.evaluate(STAY_JS)
                             if s_box:
                                 await tap_element_center(page, s_box)
                             bank_loaded = False
@@ -686,7 +767,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
 
                     await asyncio.sleep(1.5)
                     running_tasks[chat_id]["active"] = False
-                    
+
                     shot_final = await page.screenshot(full_page=True)
                     await context.bot.send_photo(
                         chat_id=chat_id,
@@ -722,7 +803,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     except Exception:
                         pass
 
-                await set_custom_price_filter(page, min_val, max_val)
+                await refresh_filter(page, min_val, max_val)
                 await asyncio.sleep(1.2)
 
             await browser.close()
@@ -731,6 +812,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
     finally:
         if chat_id in running_tasks:
             running_tasks[chat_id]["active"] = False
+
 
 async def post_init_setup(app: Application):
     async def loop_sync():
@@ -742,19 +824,21 @@ async def post_init_setup(app: Application):
                 pass
     asyncio.create_task(loop_sync())
 
+
 def main():
     threading.Thread(target=run_server, daemon=True).start()
     app = Application.builder().token(BOT_TOKEN).post_init(post_init_setup).build()
-    
+
     app.add_handler(CommandHandler("start", start_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CallbackQueryHandler(add_acc_callback, pattern="^add_acc$"))
     app.add_handler(CallbackQueryHandler(setup_callback, pattern="^setup_"))
     app.add_handler(CallbackQueryHandler(payment_choice_callback, pattern="^pay_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_all_text))
-    
+
     print("DMAPay Bot Live...")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
