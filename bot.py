@@ -7,7 +7,7 @@ from telegram.ext import (
 )
 from playwright.async_api import async_playwright
 
-BOT_TOKEN = "9105269973:AAFtunQsu9g4roxGUi2RYTt_dSahQdIqlVw"
+BOT_TOKEN = "7927071708:AAGZS1WfeoqG3ydoV3zs_qyAGFmdt0TZ0GM"
 ACCOUNTS_FILE = "dmapay_accounts.json"
 SESSION_DIR = "dmapay_sessions"
 
@@ -474,7 +474,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                     await asyncio.sleep(1.0)
                     continue
 
-                # Scan all visible orders on screen (including hidden/scrolled ones)
                 scan_result = await page.evaluate(r"""
                     (targetV) => {
                         let visiblePrices = [];
@@ -696,13 +695,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, pay_mode, m
                 # Auto-Scroll down and up smoothly to check hidden orders
                 await page.evaluate(f"window.scrollBy(0, {250 * scroll_direction})")
                 
-                # Check scroll position limits to switch direction
                 scroll_pos = await page.evaluate("window.pageYOffset")
                 max_scroll = await page.evaluate("document.body.scrollHeight - window.innerHeight")
                 if scroll_pos >= max_scroll - 50:
-                    scroll_direction = -1 # scroll up
+                    scroll_direction = -1
                 elif scroll_pos <= 10:
-                    scroll_direction = 1 # scroll down
+                    scroll_direction = 1
 
                 await asyncio.sleep(1.0)
 
