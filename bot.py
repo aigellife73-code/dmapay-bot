@@ -401,52 +401,10 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         return False
 
     await tap_point(page, box["x"], box["y"])
-    await asyncio.sleep(0.35)
+    await asyncio.sleep(0.5)
 
-    clear_box = await page.evaluate(r"""
-        (labelTxt) => {
-            let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
-            for (let item of items) {
-                let r = item.getBoundingClientRect();
-                if (r.left < 0 || r.width === 0) continue;
-                let lbl = item.querySelector('.md-field-item-title');
-                if (lbl && (lbl.innerText || '').trim() === labelTxt) {
-                    let clr = item.querySelector('.md-input-item-clear');
-                    if (clr) {
-                        let cr = clr.getBoundingClientRect();
-                        if (cr.width > 0 && cr.height > 0) {
-                            clr.click();
-                            return {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
-                        }
-                    }
-                }
-            }
-            return null;
-        }
-    """, field_label)
-
-    if clear_box:
-        await tap_point(page, clear_box["x"], clear_box["y"])
-        await asyncio.sleep(0.2)
-
+    # Clear existing value using multiple delete taps or clear button
     for _ in range(8):
-        cur_txt = await page.evaluate(r"""
-            (labelTxt) => {
-                let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
-                for (let item of items) {
-                    let r = item.getBoundingClientRect();
-                    if (r.left < 0 || r.width === 0) continue;
-                    let lbl = item.querySelector('.md-field-item-title');
-                    if (lbl && (lbl.innerText || '').trim() === labelTxt) {
-                        let sp = item.querySelector('.md-input-item-fake span');
-                        return sp ? (sp.innerText || '').trim() : '';
-                    }
-                }
-                return '';
-            }
-        """, field_label)
-        if not cur_txt:
-            break
         del_box = await page.evaluate(r"""
             () => {
                 let dels = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.delete'));
@@ -462,10 +420,11 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         """)
         if del_box:
             await tap_point(page, del_box["x"], del_box["y"])
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(0.15)
         else:
             break
 
+    # Tap each digit slowly with reliable delay
     for ch in value_str:
         key_box = await page.evaluate(r"""
             (digit) => {
@@ -484,7 +443,7 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         """, ch)
         if key_box:
             await tap_point(page, key_box["x"], key_box["y"])
-            await asyncio.sleep(0.12)
+            await asyncio.sleep(0.2)
 
     return True
 
@@ -493,9 +452,9 @@ async def set_min_max_via_keypad(page, min_val: float, max_val: float):
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
         await type_on_mand_keyboard(page, "Min", min_s)
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.4)
         await type_on_mand_keyboard(page, "Max", max_s)
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(0.4)
 
         ok_box = await page.evaluate(r"""
             () => {
@@ -512,7 +471,7 @@ async def set_min_max_via_keypad(page, min_val: float, max_val: float):
         """)
         if ok_box:
             await tap_point(page, ok_box["x"], ok_box["y"])
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.5)
 
         await trigger_refresh_arrows_or_search(page, use_search=True)
         return True
@@ -878,7 +837,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                 if order_matched_final:
                     break
 
-                # LIVE SCREENSHOT EDIT (Har 5 sec ya har 3 scan me screenshot update hoga)
+                # LIVE SCREENSHOT EDIT (Har 5 sec me photo replace hogi)
                 if scan_count % 3 == 1 or scan_count == 1:
                     try:
                         current_shot = await page.screenshot()
@@ -908,7 +867,6 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                                     media=InputMediaPhoto(media=current_shot, caption=caption_text, parse_mode="Markdown")
                                 )
                             except Exception:
-                                # Agar edit fail ho jaye to naya message bhej do
                                 sent_msg = await context.bot.send_photo(
                                     chat_id=chat_id,
                                     photo=current_shot,
