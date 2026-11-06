@@ -403,7 +403,6 @@ async def tap_element_center(page, box):
 # EXACT CLOSED-LOOP KEYPAD TYPING (NO DOUBLE DIGITS)
 # ---------------------------------------------------------------
 async def get_fake_input_value(page, field_label: str) -> str:
-    """Reads the exact numeric string currently displayed in Min or Max."""
     return await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -482,7 +481,6 @@ async def tap_keypad_ok(page):
 
 
 async def type_on_mand_keyboard(page, field_label: str, value_str: str):
-    # 1. Tap the fake input box once to open its number keyboard
     box = await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -506,7 +504,6 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
     await single_tap(page, box["x"], box["y"])
     await asyncio.sleep(0.5)
 
-    # 2. Clear existing digits completely until the field reads empty ""
     clear_box = await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -539,23 +536,19 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
         await tap_keypad_delete(page)
         await asyncio.sleep(0.15)
 
-    # 3. Closed-loop digit typing: verifies every single digit and fixes any extra/missed tap
     for _ in range(25):
         cur = await get_fake_input_value(page, field_label)
         if cur == value_str:
             break
 
         if not value_str.startswith(cur):
-            # Extra or wrong digit detected -> delete it
             await tap_keypad_delete(page)
             await asyncio.sleep(0.16)
         else:
-            # Type the next required digit once
             next_digit = value_str[len(cur)]
             await tap_keypad_digit(page, next_digit)
             await asyncio.sleep(0.22)
 
-    # 4. Close this field's keyboard by tapping 'Ok'
     await tap_keypad_ok(page)
     await asyncio.sleep(0.4)
     return True
@@ -718,15 +711,50 @@ async def check_and_click_success_ok(page):
     return False
 
 
+# ---------------------------------------------------------------
+# RELIABLE BANK DETAILS DETECTION (WORKS FOR MOBIKWIK PAY & ALL ROUTES)
+# ---------------------------------------------------------------
 async def is_bank_details_open(page):
-    cur_url = page.url
+    """
+    Detects Bank Details / Payment page regardless of URL (works on Mobikwik Pay,
+    Buy Itoken details, buyierdetail, buyingbymod, etc.).
+    """
     b_text = await page.evaluate("() => document.body.innerText || ''")
-    if ("buyierdetail" in cur_url or "buyingbymod" in cur_url) and (
-        "IFSC" in b_text or "Account" in b_text or "Upload Proof" in b_text
-    ):
-        await check_and_click_success_ok(page)
+    is_bank_page = (
+        "Please pay in time" in b_text
+        or "Upload Proof" in b_text
+        or "Payment info" in b_text
+        or "Cancel my order" in b_text
+        or ("Account" in b_text and "IFSC" in b_text and "Bank" in b_text)
+    )
+    if is_bank_page:
+        # Dismiss 'OK' notice popup if it is still overlapping the bank details
+        if await check_and_click_success_ok(page):
+            await asyncio.sleep(0.5)
         return True
     return False
+
+
+async def stop_and_send_bank_details(chat_id, page, amt_str, selected_upi, timer_str, context):
+    """Stops the task immediately and sends the final Bank Details screenshot."""
+    if chat_id in running_tasks:
+        running_tasks[chat_id]["active"] = False
+    await asyncio.sleep(0.6)
+    await check_and_click_success_ok(page)
+    await asyncio.sleep(0.4)
+    shot_final = await page.screenshot(full_page=True)
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=shot_final,
+        caption=(
+            f"🎉 **Order Matched & Bank Details Opened!**\n"
+            f"💰 **Amount:** `₹{amt_str}`\n"
+            f"💳 **UPI:** `{selected_upi['label']}`\n"
+            f"⏱️ **Time:** `{timer_str}`\n"
+            f"🛑 **Auto-Buy Stopped!**"
+        ),
+        parse_mode="Markdown"
+    )
 
 
 async def get_matching_orders(page, min_val, max_val):
@@ -832,33 +860,21 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
+                # 1. Immediate stop if Bank Details page is open
                 if await is_bank_details_open(page):
-                    await asyncio.sleep(0.6)
-                    running_tasks[chat_id]["active"] = False
-                    shot = await page.screenshot(full_page=True)
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=shot,
-                        caption=f"🎉 **Order Matched!**\n💰 `₹{target_amt}` | 💳 `{selected_upi['label']}`",
-                        parse_mode="Markdown"
-                    )
+                    await stop_and_send_bank_details(chat_id, page, target_amt, selected_upi, timer_str, context)
                     break
 
+                # 2. Dismiss 'Stay' if order was taken by someone else
                 if await check_and_click_stay(page):
                     retry_count += 1
                     await asyncio.sleep(0.6)
 
+                # 3. Click 'OK' / 'Go pay' if success notice is showing, then stop if Bank Details open
                 if await check_and_click_success_ok(page):
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.8)
                     if await is_bank_details_open(page):
-                        running_tasks[chat_id]["active"] = False
-                        shot = await page.screenshot(full_page=True)
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=shot,
-                            caption=f"🎉 **Order Matched!**\n💰 `₹{target_amt}` | 💳 `{selected_upi['label']}`",
-                            parse_mode="Markdown"
-                        )
+                        await stop_and_send_bank_details(chat_id, page, target_amt, selected_upi, timer_str, context)
                         break
 
                 scan_data = await get_matching_orders(page, min_val, max_val)
@@ -908,7 +924,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                             break
 
                         if await check_and_click_success_ok(page):
-                            await asyncio.sleep(0.8)
+                            await asyncio.sleep(0.6)
 
                         if await is_bank_details_open(page):
                             outcome = "matched"
@@ -921,26 +937,18 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
 
                     if outcome == "matched":
                         order_matched_final = True
-                        await asyncio.sleep(0.8)
-                        running_tasks[chat_id]["active"] = False
-                        shot_final = await page.screenshot(full_page=True)
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=shot_final,
-                            caption=(
-                                f"🎉 **Order Matched & Bank Details Opened!**\n"
-                                f"💰 **Amount:** `₹{int(amt)}`\n"
-                                f"💳 **UPI:** `{selected_upi['label']}`\n"
-                                f"⏱️ **Time:** `{timer_str}`"
-                            ),
-                            parse_mode="Markdown"
-                        )
+                        await stop_and_send_bank_details(chat_id, page, str(int(amt)), selected_upi, timer_str, context)
                         break
 
-                if order_matched_final:
+                if order_matched_final or not running_tasks.get(chat_id, {}).get("active", False):
                     break
 
-                # LIVE SCREENSHOT EDIT (Har 5 sec me photo replace hogi)
+                # Double-check before editing live scan screenshot so Bank Details is never treated as a scan
+                if await is_bank_details_open(page):
+                    await stop_and_send_bank_details(chat_id, page, target_amt, selected_upi, timer_str, context)
+                    break
+
+                # LIVE SCREENSHOT EDIT (Har 3 scan me photo replace hogi)
                 if scan_count % 3 == 1 or scan_count == 1:
                     try:
                         current_shot = await page.screenshot()
