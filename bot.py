@@ -68,9 +68,6 @@ def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     save_accounts(accs)
 
 
-# ---------------------------------------------------------------
-# SAVE & LOAD USER LAST RANGE / UPI PREFERENCES
-# ---------------------------------------------------------------
 def get_user_prefs(user_id: int) -> dict:
     all_prefs = load_json(PREFS_FILE, {})
     return dict(all_prefs.get(str(user_id), {}))
@@ -94,6 +91,15 @@ def save_user_pref(user_id: int, phone: str, target_amt: str, selected_upi: dict
         "recent_ranges": recent_ranges
     }
     save_json(PREFS_FILE, all_prefs)
+
+
+async def safe_delete_msg(bot, chat_id: int, msg_id: int):
+    if not msg_id:
+        return
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+    except Exception:
+        pass
 
 
 def generate_user_bookmarklet(uid, phone) -> str:
@@ -239,7 +245,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = []
 
-    # Direct 1-click button for previously configured Range + UPI
     last_phone = prefs.get("phone")
     last_amt = prefs.get("target_amt")
     last_upi = prefs.get("selected_upi")
@@ -297,7 +302,6 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last_upi = prefs.get("selected_upi")
 
     buttons = []
-    # Quick buttons for previously used ranges
     if recent_ranges:
         row = []
         for r_amt in recent_ranges:
@@ -308,13 +312,12 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if row:
             buttons.append(row)
 
-    # Also offer direct 1-tap repeat with last UPI if available
     if prefs.get("target_amt") and last_upi:
         w_name = last_upi.get("wallet") or last_upi.get("mode", "UPI").capitalize()
         mode_str = last_upi.get("mode", "mobikwik")
         buttons.append([
             InlineKeyboardButton(
-                f"🔄 Repeat Last: ₹{prefs['target_amt']} ({w_name})",
+                f"⚡ Direct: ₹{prefs['target_amt']} ({w_name})",
                 callback_data=f"repeat_{phone}_{prefs['target_amt']}_{mode_str}"
             )
         ])
@@ -461,17 +464,14 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     ])
     selected_upi = active_upis[idx_int] if idx_int < len(active_upis) else active_upis[0]
 
-    # Save preference for Repeat Order & /start quick button
     save_user_pref(chat_id, phone, target_amt, selected_upi)
 
     accounts = get_user_accounts(chat_id)
     session_data = accounts.get(phone, {})
 
+    # Menu message ko turant edit karke temporary starting message bana do (live photo aate hi ye delete ho jayega)
     status_msg = await query.edit_message_text(
-        f"🚀 **Auto-Buy Active**\n"
-        f"📱 `{phone}` | 💰 `{target_amt}` | 💳 `{selected_upi['label']}`\n\n"
-        f"⏱️ **Timer:** `00:00` | 🔄 **Scans:** `0`\n"
-        f"🛑 Stop: `/stop`",
+        f"⏳ **Starting Auto-Buy (`₹{target_amt}` | `{selected_upi['label']}`)...**",
         parse_mode="Markdown"
     )
 
@@ -485,14 +485,10 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
-# ---------------------------------------------------------------
-# REPEAT ORDER HANDLER (1-CLICK RESTART FROM MATCH OR /start)
-# ---------------------------------------------------------------
 async def repeat_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("🔄 Starting Repeat Order...")
+    await query.answer()
 
-    # Format: repeat_{phone}_{target_amt}_{mode}
     parts = query.data.split("_", 3)
     phone = parts[1] if len(parts) > 1 else ""
     target_amt = parts[2] if len(parts) > 2 else "1000"
@@ -528,14 +524,20 @@ async def repeat_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
     save_user_pref(chat_id, phone, target_amt, selected_upi)
     session_data = accounts.get(phone, {})
 
+    # SMOOTH CHAT FIX:
+    # 1. Agar Bank Details photo ke niche 'Repeat Order' dabaya hai, toh uska button hata do
+    # 2. Agar '/start' ya 'Set Range' me 'Direct Start: ₹2000' dabaya hai, toh wo menu message turant delete kar do!
+    if query.message and query.message.photo:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    elif query.message:
+        await safe_delete_msg(context.bot, chat_id, query.message.message_id)
+
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=(
-            f"🚀 **Auto-Buy Active (Repeat)**\n"
-            f"📱 `{phone}` | 💰 `{target_amt}` | 💳 `{selected_upi['label']}`\n\n"
-            f"⏱️ **Timer:** `00:00` | 🔄 **Scans:** `0`\n"
-            f"🛑 Stop: `/stop`"
-        ),
+        text=f"⏳ **Starting Auto-Buy (`₹{target_amt}` | `{selected_upi['label']}`)...**",
         parse_mode="Markdown",
         disable_notification=True
     )
@@ -902,15 +904,19 @@ async def is_bank_details_open(page):
     return False
 
 
-# ---------------------------------------------------------------
-# FINAL MATCH ALERT (WITH SOUND + REPEAT ORDER BUTTON)
-# ---------------------------------------------------------------
-async def stop_and_send_bank_details(chat_id, page, phone, target_amt, matched_amt_str, selected_upi, timer_str, context):
+async def stop_and_send_bank_details(
+    chat_id, page, phone, target_amt, matched_amt_str, selected_upi, timer_str, context,
+    temp_status_id=None, scan_photo_id=None
+):
     if chat_id in running_tasks:
         running_tasks[chat_id]["active"] = False
     await asyncio.sleep(0.6)
     await check_and_click_success_ok(page)
     await asyncio.sleep(0.4)
+
+    # Clean up temporary starting text and live scan screenshot so chat stays super clean
+    await safe_delete_msg(context.bot, chat_id, temp_status_id)
+    await safe_delete_msg(context.bot, chat_id, scan_photo_id)
 
     shot_final = await page.screenshot(full_page=True)
     w_name = selected_upi.get("wallet") or selected_upi.get("mode", "UPI").capitalize()
@@ -925,7 +931,6 @@ async def stop_and_send_bank_details(chat_id, page, phone, target_amt, matched_a
         ]
     ])
 
-    # ONLY THIS MESSAGE HAS NOTIFICATION SOUND ENABLED (disable_notification=False)
     await context.bot.send_photo(
         chat_id=chat_id,
         photo=shot_final,
@@ -988,6 +993,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
     scan_count = 0
     retry_count = 0
     last_photo_msg_id = None
+    temp_status_msg_id = message_id
 
     min_val, max_val = 0.0, 0.0
     if '-' in target_amt:
@@ -1045,21 +1051,24 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                 mins, secs = divmod(elapsed, 60)
                 timer_str = f"{mins:02d}:{secs:02d}"
 
-                # 1. Immediate stop if Bank Details page is open
                 if await is_bank_details_open(page):
-                    await stop_and_send_bank_details(chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context)
+                    await stop_and_send_bank_details(
+                        chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context,
+                        temp_status_msg_id, last_photo_msg_id
+                    )
                     break
 
-                # 2. Dismiss 'Stay' if order was taken by someone else
                 if await check_and_click_stay(page):
                     retry_count += 1
                     await asyncio.sleep(0.6)
 
-                # 3. Click 'OK' / 'Go pay' if success notice is showing, then stop if Bank Details open
                 if await check_and_click_success_ok(page):
                     await asyncio.sleep(0.8)
                     if await is_bank_details_open(page):
-                        await stop_and_send_bank_details(chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context)
+                        await stop_and_send_bank_details(
+                            chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context,
+                            temp_status_msg_id, last_photo_msg_id
+                        )
                         break
 
                 scan_data = await get_matching_orders(page, min_val, max_val)
@@ -1085,6 +1094,11 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                         retry_count += 1
                         await asyncio.sleep(0.6)
                         continue
+
+                    # Remove temporary starting text message if still visible
+                    if temp_status_msg_id:
+                        await safe_delete_msg(context.bot, chat_id, temp_status_msg_id)
+                        temp_status_msg_id = None
 
                     # SCREENSHOT 1: Buy Clicked (SILENT)
                     try:
@@ -1124,7 +1138,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                     if outcome == "matched":
                         order_matched_final = True
                         await stop_and_send_bank_details(
-                            chat_id, page, phone, target_amt, str(int(amt)), selected_upi, timer_str, context
+                            chat_id, page, phone, target_amt, str(int(amt)), selected_upi, timer_str, context,
+                            temp_status_msg_id, last_photo_msg_id
                         )
                         break
 
@@ -1132,7 +1147,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                     break
 
                 if await is_bank_details_open(page):
-                    await stop_and_send_bank_details(chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context)
+                    await stop_and_send_bank_details(
+                        chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context,
+                        temp_status_msg_id, last_photo_msg_id
+                    )
                     break
 
                 # LIVE SCREENSHOT EDIT (SILENT)
@@ -1158,6 +1176,10 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                                 disable_notification=True
                             )
                             last_photo_msg_id = sent_msg.message_id
+                            # Delete the temporary 'Starting Auto-Buy...' text message once live screenshot is active
+                            if temp_status_msg_id:
+                                await safe_delete_msg(context.bot, chat_id, temp_status_msg_id)
+                                temp_status_msg_id = None
                         else:
                             try:
                                 await context.bot.edit_message_media(
