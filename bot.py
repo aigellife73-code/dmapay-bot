@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 
 BOT_TOKEN = "7927071708:AAGZS1WfeoqG3ydoV3zs_qyAGFmdt0TZ0GM"
 ACCOUNTS_FILE = "dmapay_accounts.json"
+PREFS_FILE = "dmapay_prefs.json"
 
 last_sync_ts = 0
 running_tasks = {}
@@ -67,6 +68,34 @@ def save_user_session_clean(uid_str: str, phone: str, sess_json: dict):
     save_accounts(accs)
 
 
+# ---------------------------------------------------------------
+# SAVE & LOAD USER LAST RANGE / UPI PREFERENCES
+# ---------------------------------------------------------------
+def get_user_prefs(user_id: int) -> dict:
+    all_prefs = load_json(PREFS_FILE, {})
+    return dict(all_prefs.get(str(user_id), {}))
+
+
+def save_user_pref(user_id: int, phone: str, target_amt: str, selected_upi: dict):
+    all_prefs = load_json(PREFS_FILE, {})
+    uid_str = str(user_id)
+    user_p = all_prefs.get(uid_str, {})
+
+    recent_ranges = user_p.get("recent_ranges", [])
+    if target_amt in recent_ranges:
+        recent_ranges.remove(target_amt)
+    recent_ranges.insert(0, target_amt)
+    recent_ranges = recent_ranges[:4]
+
+    all_prefs[uid_str] = {
+        "phone": phone,
+        "target_amt": target_amt,
+        "selected_upi": selected_upi,
+        "recent_ranges": recent_ranges
+    }
+    save_json(PREFS_FILE, all_prefs)
+
+
 def generate_user_bookmarklet(uid, phone) -> str:
     return (
         f"javascript:(function(){{var d={{}};for(var i=0;i<localStorage.length;i++){{var k=localStorage.key(i);d[k]=localStorage.getItem(k);}}"
@@ -112,7 +141,8 @@ async def poll_bookmark_sync(context):
                 await context.bot.send_message(
                     chat_id=int(uid),
                     text=f"✅ **Account `{phone}` Sync Ho Gaya!**\n\nAb `/start` dabayein.",
-                    parse_mode="Markdown"
+                    parse_mode="Markdown",
+                    disable_notification=True
                 )
     except Exception:
         pass
@@ -205,26 +235,47 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await poll_bookmark_sync(context)
     context.user_data.clear()
     accounts = get_user_accounts(user.id)
+    prefs = get_user_prefs(user.id)
 
     buttons = []
+
+    # Direct 1-click button for previously configured Range + UPI
+    last_phone = prefs.get("phone")
+    last_amt = prefs.get("target_amt")
+    last_upi = prefs.get("selected_upi")
+    if last_phone and last_amt and last_upi and last_phone in accounts:
+        w_name = last_upi.get("wallet") or last_upi.get("mode", "UPI").capitalize()
+        mode_str = last_upi.get("mode", "mobikwik")
+        buttons.append([
+            InlineKeyboardButton(
+                f"⚡ Direct Start: ₹{last_amt} | {w_name}",
+                callback_data=f"repeat_{last_phone}_{last_amt}_{mode_str}"
+            )
+        ])
+
     for phone in accounts.keys():
         buttons.append([InlineKeyboardButton(f"📱 {phone}", callback_data=f"setup_{phone}")])
     buttons.append([InlineKeyboardButton("➕ Add Account / Sync", callback_data="add_acc")])
 
-    txt = "🤖 **DMAPay Auto-Buy**\n\nAccount select karein:"
+    txt = "🤖 **DMAPay Auto-Buy**\n\nAccount select karein ya Direct Start dabayein:"
     if update.callback_query:
         await update.callback_query.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
     else:
-        await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(buttons), parse_mode="Markdown")
+        await update.message.reply_text(
+            txt,
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown",
+            disable_notification=True
+        )
 
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in running_tasks and running_tasks[chat_id].get("active", False):
         running_tasks[chat_id]["active"] = False
-        await update.message.reply_text("🛑 **Stopped!**", parse_mode="Markdown")
+        await update.message.reply_text("🛑 **Stopped!**", parse_mode="Markdown", disable_notification=True)
     else:
-        await update.message.reply_text("ℹ️ Koi active task nahi hai.")
+        await update.message.reply_text("ℹ️ Koi active task nahi hai.", disable_notification=True)
 
 
 async def add_acc_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,7 +291,96 @@ async def setup_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['active_phone'] = phone
     context.user_data['state'] = 'WAIT_AMOUNT'
     await query.answer()
-    await query.edit_message_text("Set Range", parse_mode="Markdown")
+
+    prefs = get_user_prefs(update.effective_user.id)
+    recent_ranges = prefs.get("recent_ranges", [])
+    last_upi = prefs.get("selected_upi")
+
+    buttons = []
+    # Quick buttons for previously used ranges
+    if recent_ranges:
+        row = []
+        for r_amt in recent_ranges:
+            row.append(InlineKeyboardButton(f"💰 {r_amt}", callback_data=f"qrange_{phone}_{r_amt}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row:
+            buttons.append(row)
+
+    # Also offer direct 1-tap repeat with last UPI if available
+    if prefs.get("target_amt") and last_upi:
+        w_name = last_upi.get("wallet") or last_upi.get("mode", "UPI").capitalize()
+        mode_str = last_upi.get("mode", "mobikwik")
+        buttons.append([
+            InlineKeyboardButton(
+                f"🔄 Repeat Last: ₹{prefs['target_amt']} ({w_name})",
+                callback_data=f"repeat_{phone}_{prefs['target_amt']}_{mode_str}"
+            )
+        ])
+
+    await query.edit_message_text(
+        "Set Range",
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+        parse_mode="Markdown"
+    )
+
+
+async def ask_upi_for_range(chat_id: int, active_phone: str, target_amt: str, context: ContextTypes.DEFAULT_TYPE, msg_to_edit=None):
+    if msg_to_edit is None:
+        wait_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text="🔍 **Checking Active UPI...**",
+            parse_mode="Markdown",
+            disable_notification=True
+        )
+    else:
+        wait_msg = await msg_to_edit.edit_text("🔍 **Checking Active UPI...**", parse_mode="Markdown")
+
+    accounts = get_user_accounts(int(chat_id))
+    session_data = accounts.get(active_phone, {})
+    active_upis = await fetch_active_upis(session_data)
+
+    buttons = []
+    if active_upis:
+        for idx, item in enumerate(active_upis):
+            cdata = f"pay_{target_amt}_{idx}"
+            buttons.append([InlineKeyboardButton(f"✅ {item['label']}", callback_data=cdata)])
+        context.user_data['temp_active_upis'] = active_upis
+        await wait_msg.edit_text(
+            f"Set Range: `{target_amt}`\n\n👇 **Active UPI select karein:**",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown"
+        )
+    else:
+        fallback_upis = [
+            {"wallet": "Amazon", "upi": "", "label": "Amazon", "mode": "amazon"},
+            {"wallet": "Mobikwik", "upi": "", "label": "Mobikwik", "mode": "mobikwik"}
+        ]
+        context.user_data['temp_active_upis'] = fallback_upis
+        buttons = [
+            [
+                InlineKeyboardButton("💳 Amazon", callback_data=f"pay_{target_amt}_0"),
+                InlineKeyboardButton("💳 Mobikwik", callback_data=f"pay_{target_amt}_1")
+            ]
+        ]
+        await wait_msg.edit_text(
+            f"Set Range: `{target_amt}`\n\n👇 **Select UPI:**",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown"
+        )
+
+
+async def quick_range_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split("_", 2)
+    phone = parts[1] if len(parts) > 1 else ""
+    target_amt = parts[2] if len(parts) > 2 else "1000"
+
+    context.user_data['active_phone'] = phone
+    context.user_data['state'] = ''
+    await ask_upi_for_range(update.effective_chat.id, phone, target_amt, context, msg_to_edit=query.message)
 
 
 async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -252,7 +392,11 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if (text.isdigit() and len(text) == 10) or state == 'WAIT_PHONE':
         if not text.isdigit() or len(text) != 10:
-            await update.message.reply_text("❌ **10-digit Phone Number** dalein:", parse_mode="Markdown")
+            await update.message.reply_text(
+                "❌ **10-digit Phone Number** dalein:",
+                parse_mode="Markdown",
+                disable_notification=True
+            )
             return
 
         context.user_data['state'] = ''
@@ -271,7 +415,8 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             msg,
             reply_markup=InlineKeyboardMarkup(extra_btn) if extra_btn else ReplyKeyboardRemove(),
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            disable_notification=True
         )
         return
 
@@ -283,50 +428,16 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active_phone = list(accounts.keys())[0]
             context.user_data['active_phone'] = active_phone
         else:
-            await update.message.reply_text("⚠️ Pehle `/start` karein.")
+            await update.message.reply_text("⚠️ Pehle `/start` karein.", disable_notification=True)
             return
 
     if not re.match(r'^\d+(\s*-\s*\d+)?$', text):
-        await update.message.reply_text("Set Range", parse_mode="Markdown")
+        await update.message.reply_text("Set Range", parse_mode="Markdown", disable_notification=True)
         return
 
     target_amt = text.replace(" ", "")
     context.user_data['state'] = ''
-
-    wait_msg = await update.message.reply_text("🔍 **Checking Active UPI...**", parse_mode="Markdown")
-
-    accounts = get_user_accounts(int(chat_id))
-    session_data = accounts.get(active_phone, {})
-    active_upis = await fetch_active_upis(session_data)
-
-    buttons = []
-    if active_upis:
-        for idx, item in enumerate(active_upis):
-            cdata = f"pay_{target_amt}_{idx}"
-            buttons.append([InlineKeyboardButton(f"✅ {item['label']}", callback_data=cdata)])
-        context.user_data['temp_active_upis'] = active_upis
-        await wait_msg.edit_text(
-            f"Set Range\n\n👇 **Active UPI select karein:**",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="Markdown"
-        )
-    else:
-        fallback_upis = [
-            {"wallet": "Amazon", "upi": "", "label": "Amazon", "mode": "amazon"},
-            {"wallet": "Mobikwik", "upi": "", "label": "Mobikwik", "mode": "mobikwik"}
-        ]
-        context.user_data['temp_active_upis'] = fallback_upis
-        buttons = [
-            [
-                InlineKeyboardButton("💳 Amazon", callback_data=f"pay_{target_amt}_0"),
-                InlineKeyboardButton("💳 Mobikwik", callback_data=f"pay_{target_amt}_1")
-            ]
-        ]
-        await wait_msg.edit_text(
-            f"Set Range\n\n👇 **Select UPI:**",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="Markdown"
-        )
+    await ask_upi_for_range(int(chat_id), active_phone, target_amt, context)
 
 
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,6 +461,9 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     ])
     selected_upi = active_upis[idx_int] if idx_int < len(active_upis) else active_upis[0]
 
+    # Save preference for Repeat Order & /start quick button
+    save_user_pref(chat_id, phone, target_amt, selected_upi)
+
     accounts = get_user_accounts(chat_id)
     session_data = accounts.get(phone, {})
 
@@ -371,8 +485,72 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+# ---------------------------------------------------------------
+# REPEAT ORDER HANDLER (1-CLICK RESTART FROM MATCH OR /start)
+# ---------------------------------------------------------------
+async def repeat_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer("🔄 Starting Repeat Order...")
+
+    # Format: repeat_{phone}_{target_amt}_{mode}
+    parts = query.data.split("_", 3)
+    phone = parts[1] if len(parts) > 1 else ""
+    target_amt = parts[2] if len(parts) > 2 else "1000"
+    mode = parts[3] if len(parts) > 3 else "mobikwik"
+
+    chat_id = update.effective_chat.id
+    accounts = get_user_accounts(chat_id)
+    if not phone or phone not in accounts:
+        if accounts:
+            phone = list(accounts.keys())[0]
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="⚠️ Account sync nahi hai. `/start` karein.",
+                disable_notification=True
+            )
+            return
+
+    context.user_data['active_phone'] = phone
+    prefs = get_user_prefs(chat_id)
+    saved_upi = prefs.get("selected_upi", {})
+
+    if saved_upi and saved_upi.get("mode") == mode:
+        selected_upi = saved_upi
+    else:
+        selected_upi = {
+            "wallet": mode.capitalize(),
+            "upi": "",
+            "label": mode.capitalize(),
+            "mode": mode
+        }
+
+    save_user_pref(chat_id, phone, target_amt, selected_upi)
+    session_data = accounts.get(phone, {})
+
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"🚀 **Auto-Buy Active (Repeat)**\n"
+            f"📱 `{phone}` | 💰 `{target_amt}` | 💳 `{selected_upi['label']}`\n\n"
+            f"⏱️ **Timer:** `00:00` | 🔄 **Scans:** `0`\n"
+            f"🛑 Stop: `/stop`"
+        ),
+        parse_mode="Markdown",
+        disable_notification=True
+    )
+
+    if chat_id in running_tasks:
+        running_tasks[chat_id]["active"] = False
+        await asyncio.sleep(1)
+
+    running_tasks[chat_id] = {"active": True}
+    asyncio.create_task(
+        run_scanner_loop(chat_id, phone, session_data, target_amt, selected_upi, status_msg.message_id, context)
+    )
+
+
 async def single_tap(page, x, y):
-    """Single touchscreen tap so digits never double-register."""
     try:
         await page.touchscreen.tap(x, y)
     except Exception:
@@ -399,9 +577,6 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 
-# ---------------------------------------------------------------
-# EXACT CLOSED-LOOP KEYPAD TYPING (NO DOUBLE DIGITS)
-# ---------------------------------------------------------------
 async def get_fake_input_value(page, field_label: str) -> str:
     return await page.evaluate(r"""
         (labelTxt) => {
@@ -711,14 +886,7 @@ async def check_and_click_success_ok(page):
     return False
 
 
-# ---------------------------------------------------------------
-# RELIABLE BANK DETAILS DETECTION (WORKS FOR MOBIKWIK PAY & ALL ROUTES)
-# ---------------------------------------------------------------
 async def is_bank_details_open(page):
-    """
-    Detects Bank Details / Payment page regardless of URL (works on Mobikwik Pay,
-    Buy Itoken details, buyierdetail, buyingbymod, etc.).
-    """
     b_text = await page.evaluate("() => document.body.innerText || ''")
     is_bank_page = (
         "Please pay in time" in b_text
@@ -728,32 +896,49 @@ async def is_bank_details_open(page):
         or ("Account" in b_text and "IFSC" in b_text and "Bank" in b_text)
     )
     if is_bank_page:
-        # Dismiss 'OK' notice popup if it is still overlapping the bank details
         if await check_and_click_success_ok(page):
             await asyncio.sleep(0.5)
         return True
     return False
 
 
-async def stop_and_send_bank_details(chat_id, page, amt_str, selected_upi, timer_str, context):
-    """Stops the task immediately and sends the final Bank Details screenshot."""
+# ---------------------------------------------------------------
+# FINAL MATCH ALERT (WITH SOUND + REPEAT ORDER BUTTON)
+# ---------------------------------------------------------------
+async def stop_and_send_bank_details(chat_id, page, phone, target_amt, matched_amt_str, selected_upi, timer_str, context):
     if chat_id in running_tasks:
         running_tasks[chat_id]["active"] = False
     await asyncio.sleep(0.6)
     await check_and_click_success_ok(page)
     await asyncio.sleep(0.4)
+
     shot_final = await page.screenshot(full_page=True)
+    w_name = selected_upi.get("wallet") or selected_upi.get("mode", "UPI").capitalize()
+    mode_str = selected_upi.get("mode", "mobikwik")
+
+    repeat_markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                f"🔄 Repeat Order (₹{target_amt} | {w_name})",
+                callback_data=f"repeat_{phone}_{target_amt}_{mode_str}"
+            )
+        ]
+    ])
+
+    # ONLY THIS MESSAGE HAS NOTIFICATION SOUND ENABLED (disable_notification=False)
     await context.bot.send_photo(
         chat_id=chat_id,
         photo=shot_final,
         caption=(
             f"🎉 **Order Matched & Bank Details Opened!**\n"
-            f"💰 **Amount:** `₹{amt_str}`\n"
+            f"💰 **Amount:** `₹{matched_amt_str}`\n"
             f"💳 **UPI:** `{selected_upi['label']}`\n"
             f"⏱️ **Time:** `{timer_str}`\n"
             f"🛑 **Auto-Buy Stopped!**"
         ),
-        parse_mode="Markdown"
+        reply_markup=repeat_markup,
+        parse_mode="Markdown",
+        disable_notification=False
     )
 
 
@@ -862,7 +1047,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
 
                 # 1. Immediate stop if Bank Details page is open
                 if await is_bank_details_open(page):
-                    await stop_and_send_bank_details(chat_id, page, target_amt, selected_upi, timer_str, context)
+                    await stop_and_send_bank_details(chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context)
                     break
 
                 # 2. Dismiss 'Stay' if order was taken by someone else
@@ -874,7 +1059,7 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                 if await check_and_click_success_ok(page):
                     await asyncio.sleep(0.8)
                     if await is_bank_details_open(page):
-                        await stop_and_send_bank_details(chat_id, page, target_amt, selected_upi, timer_str, context)
+                        await stop_and_send_bank_details(chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context)
                         break
 
                 scan_data = await get_matching_orders(page, min_val, max_val)
@@ -901,14 +1086,15 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                         await asyncio.sleep(0.6)
                         continue
 
-                    # SCREENSHOT 1: Buy Clicked
+                    # SCREENSHOT 1: Buy Clicked (SILENT)
                     try:
                         shot_buy = await page.screenshot()
                         await context.bot.send_photo(
                             chat_id=chat_id,
                             photo=shot_buy,
                             caption=f"📸 **Buy Clicked (₹{int(amt)})**",
-                            parse_mode="Markdown"
+                            parse_mode="Markdown",
+                            disable_notification=True
                         )
                     except Exception:
                         pass
@@ -937,18 +1123,19 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
 
                     if outcome == "matched":
                         order_matched_final = True
-                        await stop_and_send_bank_details(chat_id, page, str(int(amt)), selected_upi, timer_str, context)
+                        await stop_and_send_bank_details(
+                            chat_id, page, phone, target_amt, str(int(amt)), selected_upi, timer_str, context
+                        )
                         break
 
                 if order_matched_final or not running_tasks.get(chat_id, {}).get("active", False):
                     break
 
-                # Double-check before editing live scan screenshot so Bank Details is never treated as a scan
                 if await is_bank_details_open(page):
-                    await stop_and_send_bank_details(chat_id, page, target_amt, selected_upi, timer_str, context)
+                    await stop_and_send_bank_details(chat_id, page, phone, target_amt, target_amt, selected_upi, timer_str, context)
                     break
 
-                # LIVE SCREENSHOT EDIT (Har 3 scan me photo replace hogi)
+                # LIVE SCREENSHOT EDIT (SILENT)
                 if scan_count % 3 == 1 or scan_count == 1:
                     try:
                         current_shot = await page.screenshot()
@@ -967,7 +1154,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                                 chat_id=chat_id,
                                 photo=current_shot,
                                 caption=caption_text,
-                                parse_mode="Markdown"
+                                parse_mode="Markdown",
+                                disable_notification=True
                             )
                             last_photo_msg_id = sent_msg.message_id
                         else:
@@ -982,7 +1170,8 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
                                     chat_id=chat_id,
                                     photo=current_shot,
                                     caption=caption_text,
-                                    parse_mode="Markdown"
+                                    parse_mode="Markdown",
+                                    disable_notification=True
                                 )
                                 last_photo_msg_id = sent_msg.message_id
                     except Exception:
@@ -993,7 +1182,12 @@ async def run_scanner_loop(chat_id, phone, session_data, target_amt, selected_up
 
             await browser.close()
     except Exception as e:
-        await context.bot.send_message(chat_id=chat_id, text=f"❌ Error: `{str(e)}`", parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Error: `{str(e)}`",
+            parse_mode="Markdown",
+            disable_notification=True
+        )
     finally:
         if chat_id in running_tasks:
             running_tasks[chat_id]["active"] = False
@@ -1018,7 +1212,9 @@ def main():
     app.add_handler(CommandHandler("stop", stop_cmd, filters=filters.ChatType.PRIVATE))
     app.add_handler(CallbackQueryHandler(add_acc_callback, pattern="^add_acc$"))
     app.add_handler(CallbackQueryHandler(setup_callback, pattern="^setup_"))
+    app.add_handler(CallbackQueryHandler(quick_range_callback, pattern="^qrange_"))
     app.add_handler(CallbackQueryHandler(payment_choice_callback, pattern="^pay_"))
+    app.add_handler(CallbackQueryHandler(repeat_order_callback, pattern="^repeat_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_all_text))
 
     print("DMAPay Bot Live...")
