@@ -332,7 +332,7 @@ async def handle_all_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    
+
     parts = query.data.split("_")
     target_amt = parts[1] if len(parts) > 1 else "1000"
     idx_int = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
@@ -371,6 +371,17 @@ async def payment_choice_callback(update: Update, context: ContextTypes.DEFAULT_
     )
 
 
+async def single_tap(page, x, y):
+    """Single touchscreen tap so digits never double-register."""
+    try:
+        await page.touchscreen.tap(x, y)
+    except Exception:
+        try:
+            await page.mouse.click(x, y)
+        except Exception:
+            pass
+
+
 async def tap_point(page, x, y):
     try:
         await page.touchscreen.tap(x, y)
@@ -388,8 +399,90 @@ async def tap_element_center(page, box):
     await tap_point(page, cx, cy)
 
 
+# ---------------------------------------------------------------
+# EXACT CLOSED-LOOP KEYPAD TYPING (NO DOUBLE DIGITS)
+# ---------------------------------------------------------------
+async def get_fake_input_value(page, field_label: str) -> str:
+    """Reads the exact numeric string currently displayed in Min or Max."""
+    return await page.evaluate(r"""
+        (labelTxt) => {
+            let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
+            for (let item of items) {
+                let r = item.getBoundingClientRect();
+                if (r.left < 0 || r.width === 0) continue;
+                let lbl = item.querySelector('.md-field-item-title');
+                if (lbl && (lbl.innerText || '').trim() === labelTxt) {
+                    let sp = item.querySelector('.md-input-item-fake span:not(.md-input-item-fake-placeholder)');
+                    let raw = sp ? (sp.innerText || '') : '';
+                    return raw.replace(/[^0-9]/g, '');
+                }
+            }
+            return '';
+        }
+    """, field_label)
+
+
+async def tap_keypad_delete(page):
+    del_box = await page.evaluate(r"""
+        () => {
+            let dels = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.delete'));
+            for (let d of dels) {
+                let r = d.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
+                    return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+                }
+            }
+            return null;
+        }
+    """)
+    if del_box:
+        await single_tap(page, del_box["x"], del_box["y"])
+        return True
+    return False
+
+
+async def tap_keypad_digit(page, digit: str):
+    key_box = await page.evaluate(r"""
+        (dStr) => {
+            let keys = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-number-item'));
+            for (let k of keys) {
+                let r = k.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
+                    if ((k.innerText || '').trim() === dStr) {
+                        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+                    }
+                }
+            }
+            return null;
+        }
+    """, digit)
+    if key_box:
+        await single_tap(page, key_box["x"], key_box["y"])
+        return True
+    return False
+
+
+async def tap_keypad_ok(page):
+    ok_box = await page.evaluate(r"""
+        () => {
+            let oks = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.confirm'));
+            for (let ok of oks) {
+                let r = ok.getBoundingClientRect();
+                if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
+                    return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+                }
+            }
+            return null;
+        }
+    """)
+    if ok_box:
+        await single_tap(page, ok_box["x"], ok_box["y"])
+        return True
+    return False
+
+
 async def type_on_mand_keyboard(page, field_label: str, value_str: str):
-    # Click the fake input container for Min or Max
+    # 1. Tap the fake input box once to open its number keyboard
     box = await page.evaluate(r"""
         (labelTxt) => {
             let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
@@ -399,7 +492,6 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
                 let lbl = item.querySelector('.md-field-item-title');
                 if (lbl && (lbl.innerText || '').trim() === labelTxt) {
                     let fake = item.querySelector('.md-input-item-fake') || item;
-                    fake.click();
                     let fr = fake.getBoundingClientRect();
                     return {x: fr.left + fr.width / 2, y: fr.top + fr.height / 2};
                 }
@@ -411,79 +503,80 @@ async def type_on_mand_keyboard(page, field_label: str, value_str: str):
     if not box:
         return False
 
-    await tap_point(page, box["x"], box["y"])
-    await asyncio.sleep(0.4)
+    await single_tap(page, box["x"], box["y"])
+    await asyncio.sleep(0.5)
 
-    # Completely clear existing digits by clicking delete multiple times
-    for _ in range(8):
-        del_box = await page.evaluate(r"""
-            () => {
-                let dels = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.delete'));
-                for (let d of dels) {
-                    let r = d.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
-                        d.click();
-                        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
-                    }
-                }
-                return null;
-            }
-        """)
-        if del_box:
-            await tap_point(page, del_box["x"], del_box["y"])
-            await asyncio.sleep(0.12)
-        else:
-            break
-
-    # Tap each digit of the new value slowly and accurately
-    for ch in value_str:
-        key_box = await page.evaluate(r"""
-            (digit) => {
-                let keys = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-number-item'));
-                for (let k of keys) {
-                    let r = k.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
-                        if ((k.innerText || '').trim() === digit) {
-                            k.click();
-                            return {x: r.left + r.width / 2, y: r.top + r.height / 2};
+    # 2. Clear existing digits completely until the field reads empty ""
+    clear_box = await page.evaluate(r"""
+        (labelTxt) => {
+            let items = Array.from(document.querySelectorAll('.max-min .md-input-item'));
+            for (let item of items) {
+                let r = item.getBoundingClientRect();
+                if (r.left < 0 || r.width === 0) continue;
+                let lbl = item.querySelector('.md-field-item-title');
+                if (lbl && (lbl.innerText || '').trim() === labelTxt) {
+                    let clr = item.querySelector('.md-input-item-clear');
+                    if (clr) {
+                        let cr = clr.getBoundingClientRect();
+                        if (cr.width > 0 && cr.height > 0) {
+                            return {x: cr.left + cr.width / 2, y: cr.top + cr.height / 2};
                         }
                     }
                 }
-                return null;
             }
-        """, ch)
-        if key_box:
-            await tap_point(page, key_box["x"], key_box["y"])
-            await asyncio.sleep(0.18)
+            return null;
+        }
+    """, field_label)
 
+    if clear_box:
+        await single_tap(page, clear_box["x"], clear_box["y"])
+        await asyncio.sleep(0.2)
+
+    for _ in range(12):
+        cur = await get_fake_input_value(page, field_label)
+        if not cur:
+            break
+        await tap_keypad_delete(page)
+        await asyncio.sleep(0.15)
+
+    # 3. Closed-loop digit typing: verifies every single digit and fixes any extra/missed tap
+    for _ in range(25):
+        cur = await get_fake_input_value(page, field_label)
+        if cur == value_str:
+            break
+
+        if not value_str.startswith(cur):
+            # Extra or wrong digit detected -> delete it
+            await tap_keypad_delete(page)
+            await asyncio.sleep(0.16)
+        else:
+            # Type the next required digit once
+            next_digit = value_str[len(cur)]
+            await tap_keypad_digit(page, next_digit)
+            await asyncio.sleep(0.22)
+
+    # 4. Close this field's keyboard by tapping 'Ok'
+    await tap_keypad_ok(page)
+    await asyncio.sleep(0.4)
     return True
 
 
 async def set_min_max_via_keypad(page, min_val: float, max_val: float):
     min_s, max_s = str(int(min_val)), str(int(max_val))
     try:
-        await type_on_mand_keyboard(page, "Min", min_s)
-        await asyncio.sleep(0.3)
-        await type_on_mand_keyboard(page, "Max", max_s)
-        await asyncio.sleep(0.3)
+        for _ in range(2):
+            cur_min = await get_fake_input_value(page, "Min")
+            if cur_min != min_s:
+                await type_on_mand_keyboard(page, "Min", min_s)
 
-        # Click Confirm ('Ok') on number keyboard
-        ok_box = await page.evaluate(r"""
-            () => {
-                let oks = Array.from(document.querySelectorAll('.md-number-keyboard li.keyboard-operate-item.confirm'));
-                for (let ok of oks) {
-                    let r = ok.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0 && r.top < window.innerHeight) {
-                        ok.click();
-                        return {x: r.left + r.width / 2, y: r.top + r.height / 2};
-                    }
-                }
-                return null;
-            }
-        """)
-        if ok_box:
-            await tap_point(page, ok_box["x"], ok_box["y"])
-            await asyncio.sleep(0.4)
+            cur_max = await get_fake_input_value(page, "Max")
+            if cur_max != max_s:
+                await type_on_mand_keyboard(page, "Max", max_s)
+
+            final_min = await get_fake_input_value(page, "Min")
+            final_max = await get_fake_input_value(page, "Max")
+            if final_min == min_s and final_max == max_s:
+                break
 
         await trigger_refresh_arrows_or_search(page, use_search=True)
         return True
@@ -500,7 +593,6 @@ async def trigger_refresh_arrows_or_search(page, use_search=False):
                     for (let img of imgs) {
                         let r = img.getBoundingClientRect();
                         if (r.left > 0 && r.width > 0) {
-                            img.click();
                             return {x: r.left + r.width / 2, y: r.top + r.height / 2};
                         }
                     }
@@ -514,7 +606,6 @@ async def trigger_refresh_arrows_or_search(page, use_search=False):
                     if (up && down) {
                         let upColor = (up.style.color || '').toLowerCase();
                         let target = (upColor === 'blue') ? down : up;
-                        target.click();
                         let tr = target.getBoundingClientRect();
                         return {x: tr.left + tr.width / 2, y: tr.top + tr.height / 2};
                     }
@@ -523,7 +614,7 @@ async def trigger_refresh_arrows_or_search(page, use_search=False):
             }
         """, use_search)
         if target_box:
-            await tap_point(page, target_box["x"], target_box["y"])
+            await single_tap(page, target_box["x"], target_box["y"])
     except Exception:
         pass
 
